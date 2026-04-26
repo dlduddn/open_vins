@@ -100,6 +100,18 @@ struct VioManagerOptions {
   /// The path to the file we will record the timing information into
   std::string record_timing_filepath = "ov_msckf_timing.txt";
 
+  /// If we should synchronously forward the posterior pose snapshot to a MATLAB ROS service
+  bool matlab_snapshot_enable = false;
+
+  /// ROS1 service name used to send posterior pose snapshots to MATLAB
+  std::string matlab_snapshot_service_name = "/matlab/pose_snapshot";
+
+  /// Max time to wait for the MATLAB snapshot service to become available before skipping
+  double matlab_snapshot_timeout_sec = 0.0;
+
+  /// If we should print concise debug logging for MATLAB snapshot requests and responses
+  bool matlab_snapshot_debug_log = false;
+
   /**
    * @brief This function will load print out all estimator settings loaded.
    * This allows for visual checking that everything was loaded properly from ROS/CMD parsers.
@@ -119,6 +131,10 @@ struct VioManagerOptions {
       parser->parse_config("zupt_only_at_beginning", zupt_only_at_beginning);
       parser->parse_config("record_timing_information", record_timing_information);
       parser->parse_config("record_timing_filepath", record_timing_filepath);
+      parser->parse_config("matlab_snapshot_enable", matlab_snapshot_enable, false);
+      parser->parse_config("matlab_snapshot_service_name", matlab_snapshot_service_name, false);
+      parser->parse_config("matlab_snapshot_timeout_sec", matlab_snapshot_timeout_sec, false);
+      parser->parse_config("matlab_snapshot_debug_log", matlab_snapshot_debug_log, false);
     }
     PRINT_DEBUG("  - dt_slam_delay: %.1f\n", dt_slam_delay);
     PRINT_DEBUG("  - zero_velocity_update: %d\n", try_zupt);
@@ -128,6 +144,10 @@ struct VioManagerOptions {
     PRINT_DEBUG("  - zupt_only_at_beginning?: %d\n", zupt_only_at_beginning);
     PRINT_DEBUG("  - record timing?: %d\n", (int)record_timing_information);
     PRINT_DEBUG("  - record timing filepath: %s\n", record_timing_filepath.c_str());
+    PRINT_DEBUG("  - matlab snapshot enable: %d\n", (int)matlab_snapshot_enable);
+    PRINT_DEBUG("  - matlab snapshot service: %s\n", matlab_snapshot_service_name.c_str());
+    PRINT_DEBUG("  - matlab snapshot timeout sec: %.3f\n", matlab_snapshot_timeout_sec);
+    PRINT_DEBUG("  - matlab snapshot debug log: %d\n", (int)matlab_snapshot_debug_log);
   }
 
   // NOISE / CHI2 ============================

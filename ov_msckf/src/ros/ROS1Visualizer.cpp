@@ -22,6 +22,7 @@
 #include "ROS1Visualizer.h"
 
 #include "core/VioManager.h"
+#include "ov_msckf/PoseSnapshotToMatlab.h"
 #include "ros/ROSVisualizerHelper.h"
 #include "sim/Simulator.h"
 #include "state/Propagator.h"
@@ -31,12 +32,26 @@
 #include "utils/print.h"
 #include "utils/sensor_data.h"
 
+#include <cmath>
+
 using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
 
+namespace {
+
+template <typename Derived> bool all_finite(const Eigen::MatrixBase<Derived> &value) { return value.array().isFinite().all(); }
+
+} // namespace
+
 ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
     : _nh(nh), _app(app), _sim(sim), thread_update_running(false) {
+
+  const auto params = _app->get_params();
+  matlab_snapshot_enable = params.matlab_snapshot_enable;
+  matlab_snapshot_service_name = params.matlab_snapshot_service_name;
+  matlab_snapshot_timeout_sec = params.matlab_snapshot_timeout_sec;
+  matlab_snapshot_debug_log = params.matlab_snapshot_debug_log;
 
   // Setup our transform broadcaster
   mTfBr = std::make_shared<tf::TransformBroadcaster>();
@@ -79,6 +94,16 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
   pub_loop_intrinsics = nh->advertise<sensor_msgs::CameraInfo>("loop_intrinsics", 2);
   it_pub_loop_img_depth = it.advertise("loop_depth", 2);
   it_pub_loop_img_depth_color = it.advertise("loop_depth_colored", 2);
+
+  if (matlab_snapshot_enable && !matlab_snapshot_service_name.empty()) {
+    matlab_snapshot_client = _nh->serviceClient<ov_msckf::PoseSnapshotToMatlab>(matlab_snapshot_service_name, false);
+    if (matlab_snapshot_debug_log) {
+      PRINT_DEBUG("Configured MATLAB snapshot service client: %s (timeout=%.3f sec)\n", matlab_snapshot_service_name.c_str(),
+                  matlab_snapshot_timeout_sec);
+    }
+  } else if (matlab_snapshot_enable && matlab_snapshot_debug_log) {
+    PRINT_DEBUG("MATLAB snapshot requests enabled but service name is empty; requests will be skipped.\n");
+  }
 
   // option to enable publishing of global to IMU transformation
   nh->param<bool>("publish_global_to_imu_tf", publish_global2imu_tf, true);
@@ -145,6 +170,94 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
       }
     });
     thread.detach();
+  }
+}
+
+void ROS1Visualizer::maybe_send_matlab_snapshot_request() {
+
+  if (!matlab_snapshot_enable || !_app->initialized())
+    return;
+
+  if (matlab_snapshot_service_name.empty()) {
+    if (matlab_snapshot_debug_log) {
+      PRINT_DEBUG("Skipping MATLAB snapshot request because service name is empty.\n");
+    } else {
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request because matlab_snapshot_service_name is empty.");
+    }
+    return;
+  }
+
+  std::shared_ptr<State> state = _app->get_state();
+  if (state == nullptr)
+    return;
+
+  const double timestamp_cam = state->_timestamp;
+  const double timestamp_imu = state->_timestamp + state->_calib_dt_CAMtoIMU->value()(0);
+  const Eigen::Vector3d position = state->_imu->pos();
+  const Eigen::Vector4d quaternion = state->_imu->quat();
+  std::vector<std::shared_ptr<ov_type::Type>> order = {state->_imu->pose()->p(), state->_imu->pose()->q()};
+  const Eigen::Matrix<double, 6, 6> covariance = StateHelper::get_marginal_covariance(state, order);
+
+  const bool values_finite = std::isfinite(timestamp_cam) && std::isfinite(timestamp_imu) && all_finite(position) && all_finite(quaternion) &&
+                             all_finite(covariance);
+  if (!values_finite) {
+    if (matlab_snapshot_debug_log) {
+      PRINT_DEBUG("Skipping MATLAB snapshot request due to non-finite posterior values: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] "
+                  "q=[%.6f %.6f %.6f %.6f]\n",
+                  timestamp_cam, timestamp_imu, position(0), position(1), position(2), quaternion(0), quaternion(1), quaternion(2),
+                  quaternion(3));
+    } else {
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request due to non-finite posterior values.");
+    }
+    return;
+  }
+
+  ov_msckf::PoseSnapshotToMatlab snapshot_srv;
+  snapshot_srv.request.timestamp_cam = timestamp_cam;
+  snapshot_srv.request.timestamp_imu = timestamp_imu;
+  for (int i = 0; i < 3; i++) {
+    snapshot_srv.request.position[i] = position(i);
+  }
+  for (int i = 0; i < 4; i++) {
+    snapshot_srv.request.quaternion_jpl_xyzw[i] = quaternion(i);
+  }
+  for (int r = 0; r < 6; r++) {
+    for (int c = 0; c < 6; c++) {
+      snapshot_srv.request.pose_covariance_row_major[6 * r + c] = covariance(r, c);
+    }
+  }
+
+  if (matlab_snapshot_debug_log) {
+    PRINT_DEBUG("MATLAB snapshot request: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]\n", timestamp_cam, timestamp_imu,
+                position(0), position(1), position(2), quaternion(0), quaternion(1), quaternion(2), quaternion(3));
+  }
+
+  const bool service_available = (matlab_snapshot_timeout_sec > 0.0)
+                                     ? matlab_snapshot_client.waitForExistence(ros::Duration(matlab_snapshot_timeout_sec))
+                                     : matlab_snapshot_client.exists();
+  if (!service_available) {
+    if (matlab_snapshot_debug_log) {
+      PRINT_DEBUG("MATLAB snapshot service unavailable: %s (timeout=%.3f sec)\n", matlab_snapshot_service_name.c_str(),
+                  matlab_snapshot_timeout_sec);
+    } else {
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request because service '" << matlab_snapshot_service_name
+                                                                                           << "' is unavailable (timeout="
+                                                                                           << matlab_snapshot_timeout_sec << " sec).");
+    }
+    return;
+  }
+
+  const bool call_success = matlab_snapshot_client.call(snapshot_srv);
+  if (matlab_snapshot_debug_log) {
+    PRINT_DEBUG("MATLAB snapshot service result: success=%d accepted=%d status=\"%s\"\n", (int)call_success,
+                call_success ? (int)snapshot_srv.response.accepted : 0,
+                call_success ? snapshot_srv.response.status_message.c_str() : "");
+  }
+  if (!call_success) {
+    if (!matlab_snapshot_debug_log) {
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request because service call to '" << matlab_snapshot_service_name
+                                                                                                   << "' failed.");
+    }
   }
 }
 
@@ -476,6 +589,7 @@ void ROS1Visualizer::callback_inertial(const sensor_msgs::Imu::ConstPtr &msg) {
         auto rT0_1 = boost::posix_time::microsec_clock::local_time();
         double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
         _app->feed_measurement_camera(camera_queue.at(0));
+        maybe_send_matlab_snapshot_request();
         visualize();
         camera_queue.pop_front();
         auto rT0_2 = boost::posix_time::microsec_clock::local_time();
