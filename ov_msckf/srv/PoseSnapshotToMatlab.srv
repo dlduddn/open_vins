@@ -1,0 +1,8 @@
+float64 timestamp_cam
+float64 timestamp_imu
+float64[3] position
+float64[4] quaternion_jpl_xyzw
+float64[36] pose_covariance_row_major
+---
+bool accepted
+string status_message
