@@ -33,6 +33,8 @@
     <depend condition="$ROS_VERSION == 1">visualization_msgs</depend>
     <depend condition="$ROS_VERSION == 1">image_transport</depend>
     <depend condition="$ROS_VERSION == 1">cv_bridge</depend>
+    <build_depend condition="$ROS_VERSION == 1">message_generation</build_depend>
+    <exec_depend condition="$ROS_VERSION == 1">message_runtime</exec_depend>
     <depend condition="$ROS_VERSION == 1">ov_core</depend>
     <depend condition="$ROS_VERSION == 1">ov_init</depend>
 

@@ -42,9 +42,12 @@
 #include <tf/transform_broadcaster.h>
 
 #include <atomic>
+#include <deque>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include <Eigen/Eigen>
 #include <boost/date_time/posix_time/posix_time.hpp>
@@ -130,6 +133,9 @@ protected:
   /// Publish loop-closure information of current pose and active track information
   void publish_loopclosure_information();
 
+  /// Synchronously send the latest posterior pose snapshot to the MATLAB ROS service.
+  void maybe_send_matlab_snapshot_request();
+
   /// Global node handler
   std::shared_ptr<ros::NodeHandle> _nh;
 
@@ -148,10 +154,17 @@ protected:
 
   // Our subscribers and camera synchronizers
   ros::Subscriber sub_imu;
+  ros::ServiceClient matlab_snapshot_client;
   std::vector<ros::Subscriber> subs_cam;
   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> sync_pol;
   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
   std::vector<std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>>> sync_subs_cam;
+
+  // MATLAB snapshot service configuration
+  bool matlab_snapshot_enable = false;
+  std::string matlab_snapshot_service_name;
+  double matlab_snapshot_timeout_sec = 0.0;
+  bool matlab_snapshot_debug_log = false;
 
   // For path viz
   unsigned int poses_seq_imu = 0;
