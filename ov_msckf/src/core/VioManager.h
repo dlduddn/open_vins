@@ -22,11 +22,13 @@
 #ifndef OV_MSCKF_VIOMANAGER_H
 #define OV_MSCKF_VIOMANAGER_H
 
+#include <Eigen/Eigen>
 #include <Eigen/StdVector>
 #include <algorithm>
 #include <atomic>
 #include <boost/filesystem.hpp>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -51,6 +53,26 @@ class UpdaterMSCKF;
 class UpdaterSLAM;
 class UpdaterZeroVelocity;
 class Propagator;
+
+/// Snapshot of the clone pose used as the MATLAB constraint linearization point.
+struct MatlabConstraintSnapshot {
+  double timestamp_cam = -1;
+  double timestamp_imu = -1;
+  Eigen::Vector3d position = Eigen::Vector3d::Zero();
+  Eigen::Vector4d quaternion = Eigen::Vector4d::Zero();
+  Eigen::Matrix<double, 6, 6> pose_covariance = Eigen::Matrix<double, 6, 6>::Zero();
+};
+
+/// Linearized constraint returned by MATLAB for the provided snapshot.
+struct MatlabConstraintUpdate {
+  bool accepted = false;
+  std::string status_message;
+  Eigen::VectorXd r;
+  Eigen::MatrixXd H;
+  Eigen::MatrixXd R;
+};
+
+using MatlabConstraintCallback = std::function<bool(const MatlabConstraintSnapshot &, MatlabConstraintUpdate &)>;
 
 /**
  * @brief Core class that manages the entire system
@@ -110,6 +132,9 @@ public:
   /// Accessor to get the current propagator
   std::shared_ptr<Propagator> get_propagator() { return propagator; }
 
+  /// Optional synchronous callback that returns an EKF-ready MATLAB constraint for the current clone.
+  void set_matlab_constraint_callback(MatlabConstraintCallback callback) { matlab_constraint_callback = callback; }
+
   /// Get a nice visualization image of what tracks we have
   cv::Mat get_historical_viz_image();
 
@@ -152,6 +177,13 @@ protected:
    * @param message Contains our timestamp, images, and camera ids
    */
   void do_feature_propagate_update(const ov_core::CameraData &message);
+
+  /**
+   * @brief Query MATLAB for a constraint linearized at the current image clone and immediately apply it.
+   * @param message Contains the image timestamp used to find the t_k IMU clone
+   * @return True if a MATLAB constraint was accepted and applied
+   */
+  bool try_apply_matlab_constraint_update(const ov_core::CameraData &message);
 
   /**
    * @brief This function will try to initialize the state.
@@ -205,6 +237,9 @@ protected:
 
   /// Our zero velocity tracker
   std::shared_ptr<UpdaterZeroVelocity> updaterZUPT;
+
+  /// Optional MATLAB constraint callback registered by the ROS wrapper.
+  MatlabConstraintCallback matlab_constraint_callback;
 
   /// This is the queue of measurement times that have come in since we starting doing initialization
   /// After we initialize, we will want to prop & update to the latest timestamp quickly

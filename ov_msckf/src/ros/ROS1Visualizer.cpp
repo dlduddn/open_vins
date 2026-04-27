@@ -38,28 +38,45 @@ using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
 
+// -----------------------------------------------------------------------------
+// Local helpers
+// -----------------------------------------------------------------------------
+// Small file-local utilities used by the MATLAB snapshot extension.
 namespace {
 
 template <typename Derived> bool all_finite(const Eigen::MatrixBase<Derived> &value) { return value.array().isFinite().all(); }
 
 } // namespace
 
+// -----------------------------------------------------------------------------
+// Construction: ROS publishers, optional MATLAB client, and output files
+// -----------------------------------------------------------------------------
 ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
     : _nh(nh), _app(app), _sim(sim), thread_update_running(false) {
 
+  // 생성자에서는 ROS visualization에 필요한 publisher와 optional 기능을 한 번에 준비한다.
+  // nh는 ROS node handle, app은 VIO core(VioManager), sim은 simulation 사용 시 groundtruth를 제공한다.
+
+  // MATLAB extension 설정값을 VioManagerOptions에서 읽어 ROS1Visualizer 멤버 변수에 저장한다.
+  // 이후 MATLAB service client 생성과 callback 요청에서 이 값을 사용한다.
   const auto params = _app->get_params();
   matlab_snapshot_enable = params.matlab_snapshot_enable;
   matlab_snapshot_service_name = params.matlab_snapshot_service_name;
   matlab_snapshot_timeout_sec = params.matlab_snapshot_timeout_sec;
   matlab_snapshot_debug_log = params.matlab_snapshot_debug_log;
 
-  // Setup our transform broadcaster
+  // TF broadcaster를 만든다.
+  // publish_global_to_imu_tf 또는 calibration tf 옵션이 켜져 있으면 transform을 ROS TF로 publish할 때 사용된다.
   mTfBr = std::make_shared<tf::TransformBroadcaster>();
 
-  // Create image transport
+  // image_transport는 ROS image topic을 publish하기 위한 전용 helper이다.
+  // 일반 ROS publisher보다 image transport plugin/compression 경로와 잘 맞는다.
   image_transport::ImageTransport it(*_nh);
 
-  // Setup pose and path publisher
+  // 아래 publisher들은 OpenVINS의 기본 출력이다.
+  // state estimate, path, feature cloud, tracking image, groundtruth, loop-closure 정보를 ROS topic으로 내보낸다.
+
+  // 현재 IMU pose/covariance, odometry, 누적 path를 publish할 topic을 만든다.
   pub_poseimu = nh->advertise<geometry_msgs::PoseWithCovarianceStamped>("poseimu", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_poseimu.getTopic().c_str());
   pub_odomimu = nh->advertise<nav_msgs::Odometry>("odomimu", 2);
@@ -67,7 +84,8 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
   pub_pathimu = nh->advertise<nav_msgs::Path>("pathimu", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_pathimu.getTopic().c_str());
 
-  // 3D points publishing
+  // 추정/관리 중인 3D feature point들을 종류별로 publish한다.
+  // MSCKF feature, SLAM landmark, ARUCO marker, simulator feature를 RViz 등에서 볼 수 있다.
   pub_points_msckf = nh->advertise<sensor_msgs::PointCloud2>("points_msckf", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_points_msckf.getTopic().c_str());
   pub_points_slam = nh->advertise<sensor_msgs::PointCloud2>("points_slam", 2);
@@ -77,17 +95,20 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
   pub_points_sim = nh->advertise<sensor_msgs::PointCloud2>("points_sim", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_points_sim.getTopic().c_str());
 
-  // Our tracking image
+  // feature tracking 결과를 그린 image를 publish한다.
+  // track history나 feature movement를 시각적으로 확인하는 용도이다.
   it_pub_tracks = it.advertise("trackhist", 2);
   PRINT_DEBUG("Publishing: %s\n", it_pub_tracks.getTopic().c_str());
 
-  // Groundtruth publishers
+  // groundtruth pose/path가 있으면 publish할 topic을 만든다.
+  // dataset groundtruth 또는 simulator groundtruth와 estimate를 비교할 때 사용된다.
   pub_posegt = nh->advertise<geometry_msgs::PoseStamped>("posegt", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_posegt.getTopic().c_str());
   pub_pathgt = nh->advertise<nav_msgs::Path>("pathgt", 2);
   PRINT_DEBUG("Publishing: %s\n", pub_pathgt.getTopic().c_str());
 
-  // Loop closure publishers
+  // loop-closure 관련 pose, feature, calibration, depth image 출력을 위한 publisher들이다.
+  // loop closure 모듈이 켜져 있을 때 후단 모듈이나 시각화 도구가 이 topic들을 구독할 수 있다.
   pub_loop_pose = nh->advertise<nav_msgs::Odometry>("loop_pose", 2);
   pub_loop_point = nh->advertise<sensor_msgs::PointCloud>("loop_feats", 2);
   pub_loop_extrinsic = nh->advertise<nav_msgs::Odometry>("loop_extrinsic", 2);
@@ -95,22 +116,35 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
   it_pub_loop_img_depth = it.advertise("loop_depth", 2);
   it_pub_loop_img_depth_color = it.advertise("loop_depth_colored", 2);
 
+  // MATLAB extension이 켜져 있고 service 이름이 설정되어 있으면 MATLAB service client를 만든다.
+  // 이 client는 VioManager core가 MATLAB constraint를 요청할 때 사용된다.
   if (matlab_snapshot_enable && !matlab_snapshot_service_name.empty()) {
     matlab_snapshot_client = _nh->serviceClient<ov_msckf::PoseSnapshotToMatlab>(matlab_snapshot_service_name, false);
+
+    // VioManager는 ROS를 직접 알지 않도록 callback 인터페이스만 가진다.
+    // 여기서 ROS1Visualizer가 람다를 등록해, core가 snapshot/update를 넘기면
+    // request_matlab_constraint_update()를 통해 실제 ROS service call을 수행하게 한다.
+    // [this]는 현재 ROS1Visualizer 객체의 멤버 함수와 service client에 접근하기 위한 캡처이다.
+    _app->set_matlab_constraint_callback(
+        [this](const MatlabConstraintSnapshot &snapshot, MatlabConstraintUpdate &update) { return request_matlab_constraint_update(snapshot, update); });
+
+    // debug log가 켜져 있으면 어떤 MATLAB service에 연결하도록 설정되었는지 출력한다.
     if (matlab_snapshot_debug_log) {
       PRINT_DEBUG("Configured MATLAB snapshot service client: %s (timeout=%.3f sec)\n", matlab_snapshot_service_name.c_str(),
                   matlab_snapshot_timeout_sec);
     }
   } else if (matlab_snapshot_enable && matlab_snapshot_debug_log) {
+    // 기능은 켜졌지만 service 이름이 비어 있으면 실제 요청은 보낼 수 없다.
     PRINT_DEBUG("MATLAB snapshot requests enabled but service name is empty; requests will be skipped.\n");
   }
 
-  // option to enable publishing of global to IMU transformation
+  // ROS parameter에서 TF publish 옵션을 읽는다.
+  // global->IMU transform과 calibration transform을 TF tree에 올릴지 결정한다.
   nh->param<bool>("publish_global_to_imu_tf", publish_global2imu_tf, true);
   nh->param<bool>("publish_calibration_tf", publish_calibration_tf, true);
 
-  // Load groundtruth if we have it and are not doing simulation
-  // NOTE: needs to be a csv ASL format file
+  // simulation이 아닌 dataset 실행에서 path_gt parameter가 있으면 groundtruth CSV를 로드한다.
+  // 파일은 ASL dataset 형식의 CSV여야 한다.
   if (nh->hasParam("path_gt") && _sim == nullptr) {
     std::string path_to_gt;
     nh->param<std::string>("path_gt", path_to_gt, "");
@@ -120,28 +154,28 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
     }
   }
 
-  // Load if we should save the total state to file
-  // If so, then open the file and create folders as needed
+  // 전체 state 추정값과 표준편차를 파일로 저장할지 ROS parameter에서 읽는다.
+  // 저장이 켜져 있으면 출력 경로를 준비하고 파일 header를 쓴다.
   nh->param<bool>("save_total_state", save_total_state, false);
   if (save_total_state) {
 
-    // files we will open
+    // 저장할 estimate, standard deviation, groundtruth 파일 경로를 읽는다.
     std::string filepath_est, filepath_std, filepath_gt;
     nh->param<std::string>("filepath_est", filepath_est, "state_estimate.txt");
     nh->param<std::string>("filepath_std", filepath_std, "state_deviation.txt");
     nh->param<std::string>("filepath_gt", filepath_gt, "state_groundtruth.txt");
 
-    // If it exists, then delete it
+    // 같은 경로의 이전 결과 파일이 있으면 새 실행 결과와 섞이지 않도록 삭제한다.
     if (boost::filesystem::exists(filepath_est))
       boost::filesystem::remove(filepath_est);
     if (boost::filesystem::exists(filepath_std))
       boost::filesystem::remove(filepath_std);
 
-    // Create folder path to this location if not exists
+    // 출력 파일이 들어갈 폴더가 없으면 생성한다.
     boost::filesystem::create_directories(boost::filesystem::path(filepath_est.c_str()).parent_path());
     boost::filesystem::create_directories(boost::filesystem::path(filepath_std.c_str()).parent_path());
 
-    // Open the files
+    // estimate/std 파일을 열고 column 설명 header를 기록한다.
     of_state_est.open(filepath_est.c_str());
     of_state_std.open(filepath_std.c_str());
     of_state_est << "# timestamp(s) q p v bg ba cam_imu_dt num_cam cam0_k cam0_d cam0_rot cam0_trans ... imu_model dw da tg wtoI atoI etc"
@@ -149,7 +183,7 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
     of_state_std << "# timestamp(s) q p v bg ba cam_imu_dt num_cam cam0_k cam0_d cam0_rot cam0_trans ... imu_model dw da tg wtoI atoI etc"
                  << std::endl;
 
-    // Groundtruth if we are simulating
+    // simulation 실행에서는 simulator groundtruth도 별도 파일로 저장한다.
     if (_sim != nullptr) {
       if (boost::filesystem::exists(filepath_gt))
         boost::filesystem::remove(filepath_gt);
@@ -160,7 +194,8 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
     }
   }
 
-  // Start thread for the image publishing
+  // image publish를 별도 thread에서 돌릴지 설정값에 따라 결정한다.
+  // multi-thread publisher가 켜져 있으면 20Hz로 publish_images()를 반복 호출한다.
   if (_app->get_params().use_multi_threading_pubs) {
     std::thread thread([&] {
       ros::Rate loop_rate(20);
@@ -173,94 +208,179 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
   }
 }
 
-void ROS1Visualizer::maybe_send_matlab_snapshot_request() {
+// -----------------------------------------------------------------------------
+// MATLAB extension: request a linearized constraint for a specific clone snapshot
+// -----------------------------------------------------------------------------
+bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnapshot &snapshot, MatlabConstraintUpdate &update) {
 
-  if (!matlab_snapshot_enable || !_app->initialized())
-    return;
+  // 설정에서 MATLAB constraint 기능이 꺼져 있으면 estimator 쪽에는 "호출하지 못함"으로 알려준다.
+  // 이 경우 VioManager는 외부 constraint 없이 기존 OpenVINS update만 수행한다.
+  if (!matlab_snapshot_enable)
+    return false;
 
+  // service 이름이 비어 있으면 ROS service client가 연결할 대상이 없다.
+  // false를 반환하면 VioManager는 MATLAB update를 적용하지 않는다.
   if (matlab_snapshot_service_name.empty()) {
     if (matlab_snapshot_debug_log) {
-      PRINT_DEBUG("Skipping MATLAB snapshot request because service name is empty.\n");
+      PRINT_DEBUG("Skipping MATLAB constraint request because service name is empty.\n");
     } else {
-      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request because matlab_snapshot_service_name is empty.");
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB constraint request because matlab_snapshot_service_name is empty.");
     }
-    return;
+    return false;
   }
 
-  std::shared_ptr<State> state = _app->get_state();
-  if (state == nullptr)
-    return;
-
-  const double timestamp_cam = state->_timestamp;
-  const double timestamp_imu = state->_timestamp + state->_calib_dt_CAMtoIMU->value()(0);
-  const Eigen::Vector3d position = state->_imu->pos();
-  const Eigen::Vector4d quaternion = state->_imu->quat();
-  std::vector<std::shared_ptr<ov_type::Type>> order = {state->_imu->pose()->p(), state->_imu->pose()->q()};
-  const Eigen::Matrix<double, 6, 6> covariance = StateHelper::get_marginal_covariance(state, order);
-
-  const bool values_finite = std::isfinite(timestamp_cam) && std::isfinite(timestamp_imu) && all_finite(position) && all_finite(quaternion) &&
-                             all_finite(covariance);
+  // VioManager가 넘겨준 snapshot은 MATLAB이 선형화 기준점으로 사용할 pose이다.
+  // timestamp, position, quaternion, covariance 중 NaN/Inf가 있으면 MATLAB 계산과 EKF update가
+  // 모두 위험해지므로 service 호출 전에 차단한다.
+  const bool values_finite = std::isfinite(snapshot.timestamp_cam) && std::isfinite(snapshot.timestamp_imu) && all_finite(snapshot.position) &&
+                             all_finite(snapshot.quaternion) && all_finite(snapshot.pose_covariance);
   if (!values_finite) {
     if (matlab_snapshot_debug_log) {
-      PRINT_DEBUG("Skipping MATLAB snapshot request due to non-finite posterior values: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] "
-                  "q=[%.6f %.6f %.6f %.6f]\n",
-                  timestamp_cam, timestamp_imu, position(0), position(1), position(2), quaternion(0), quaternion(1), quaternion(2),
-                  quaternion(3));
+      PRINT_DEBUG("Skipping MATLAB constraint request due to non-finite snapshot values: t_cam=%.6f t_imu=%.6f\n", snapshot.timestamp_cam,
+                  snapshot.timestamp_imu);
     } else {
-      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request due to non-finite posterior values.");
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB constraint request due to non-finite snapshot values.");
     }
-    return;
+    return false;
   }
 
+  // ROS service request 메시지를 만든다.
+  // 여기 담기는 pose는 현재 IMU state가 아니라, VioManager가 선택한 t_k clone pose이다.
   ov_msckf::PoseSnapshotToMatlab snapshot_srv;
-  snapshot_srv.request.timestamp_cam = timestamp_cam;
-  snapshot_srv.request.timestamp_imu = timestamp_imu;
+  snapshot_srv.request.timestamp_cam = snapshot.timestamp_cam;
+  snapshot_srv.request.timestamp_imu = snapshot.timestamp_imu;
+
+  // Eigen vector를 ROS 고정 길이 배열 필드로 복사한다.
+  // quaternion은 OpenVINS 내부 convention인 JPL [x y z w] 순서 그대로 보낸다.
   for (int i = 0; i < 3; i++) {
-    snapshot_srv.request.position[i] = position(i);
+    snapshot_srv.request.position[i] = snapshot.position(i);
   }
   for (int i = 0; i < 4; i++) {
-    snapshot_srv.request.quaternion_jpl_xyzw[i] = quaternion(i);
+    snapshot_srv.request.quaternion[i] = snapshot.quaternion(i);
   }
+
+  // covariance는 MATLAB에서 reshape하기 쉽도록 row-major 1차원 배열로 펼친다.
+  // 이 서비스의 6D pose error 순서는 [position_error(3), orientation_error(3)]이다.
+  // MATLAB이 반환하는 H의 6개 column도 반드시 같은 순서를 따라야 한다.
   for (int r = 0; r < 6; r++) {
     for (int c = 0; c < 6; c++) {
-      snapshot_srv.request.pose_covariance_row_major[6 * r + c] = covariance(r, c);
+      snapshot_srv.request.pose_covariance_row_major[6 * r + c] = snapshot.pose_covariance(r, c);
     }
   }
 
   if (matlab_snapshot_debug_log) {
-    PRINT_DEBUG("MATLAB snapshot request: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]\n", timestamp_cam, timestamp_imu,
-                position(0), position(1), position(2), quaternion(0), quaternion(1), quaternion(2), quaternion(3));
+    PRINT_DEBUG("MATLAB constraint request: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]\n",
+                snapshot.timestamp_cam, snapshot.timestamp_imu,
+                snapshot.position(0), snapshot.position(1), snapshot.position(2),
+                snapshot.quaternion(0), snapshot.quaternion(1), snapshot.quaternion(2), snapshot.quaternion(3));
   }
 
+  // MATLAB service server가 ROS master에 등록되어 있는지 확인한다.
+  // timeout이 양수이면 해당 시간만큼 등록을 기다리고, 0 이하이면 현재 존재 여부만 즉시 확인한다.
+  // 주의: 이 timeout은 service 등록 대기 시간이고, 아래 call() 자체의 실행 시간 제한은 아니다.
   const bool service_available = (matlab_snapshot_timeout_sec > 0.0)
                                      ? matlab_snapshot_client.waitForExistence(ros::Duration(matlab_snapshot_timeout_sec))
                                      : matlab_snapshot_client.exists();
   if (!service_available) {
     if (matlab_snapshot_debug_log) {
-      PRINT_DEBUG("MATLAB snapshot service unavailable: %s (timeout=%.3f sec)\n", matlab_snapshot_service_name.c_str(),
+      PRINT_DEBUG("MATLAB constraint service unavailable: %s (timeout=%.3f sec)\n", matlab_snapshot_service_name.c_str(),
                   matlab_snapshot_timeout_sec);
     } else {
-      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request because service '" << matlab_snapshot_service_name
-                                                                                           << "' is unavailable (timeout="
-                                                                                           << matlab_snapshot_timeout_sec << " sec).");
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB constraint request because service '" << matlab_snapshot_service_name
+                                                                                            << "' is unavailable (timeout="
+                                                                                            << matlab_snapshot_timeout_sec << " sec).");
     }
-    return;
+    return false;
   }
 
+  // 동기식 service 호출이다.
+  // MATLAB callback이 H/r/R을 계산해서 response를 반환할 때까지 camera update thread가 여기서 대기한다.
+  // 따라서 이 함수가 반환된 직후 VioManager가 같은 선형화 기준점에 EKF update를 걸 수 있다.
   const bool call_success = matlab_snapshot_client.call(snapshot_srv);
   if (matlab_snapshot_debug_log) {
-    PRINT_DEBUG("MATLAB snapshot service result: success=%d accepted=%d status=\"%s\"\n", (int)call_success,
+    PRINT_DEBUG("MATLAB constraint service result: success=%d accepted=%d status=\"%s\"\n", (int)call_success,
                 call_success ? (int)snapshot_srv.response.accepted : 0,
                 call_success ? snapshot_srv.response.status_message.c_str() : "");
   }
+
+  // call_success=false는 ROS service transport 자체가 실패한 경우이다.
+  // MATLAB이 계산은 했지만 constraint를 쓰지 않겠다고 판단한 경우는 accepted=false로 구분한다.
   if (!call_success) {
     if (!matlab_snapshot_debug_log) {
-      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB snapshot request because service call to '" << matlab_snapshot_service_name
-                                                                                                   << "' failed.");
+      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB constraint request because service call to '" << matlab_snapshot_service_name
+                                                                                                     << "' failed.");
+    }
+    return false;
+  }
+
+  // MATLAB의 판단 결과를 VioManager에 넘긴다.
+  // 이 함수의 return true는 "service call은 정상 처리됨"이고,
+  // update.accepted가 실제 EKF update 적용 여부를 결정한다.
+  update.accepted = snapshot_srv.response.accepted;
+  update.status_message = snapshot_srv.response.status_message;
+  if (!update.accepted)
+    return true;
+
+  // MATLAB이 accepted=true를 보냈다면 residual/Jacobian/noise payload를 Eigen 행렬로 복원한다.
+  // residual_rows = m, H = m x 6, R = m x m 형태가 되어야 한다.
+  const int residual_rows = static_cast<int>(snapshot_srv.response.residual.size());
+  const int jacobian_rows = static_cast<int>(snapshot_srv.response.jacobian_rows);
+  const int jacobian_cols = static_cast<int>(snapshot_srv.response.jacobian_cols);
+  const int measurement_cov_rows = static_cast<int>(snapshot_srv.response.measurement_cov_rows);
+  const int measurement_cov_cols = static_cast<int>(snapshot_srv.response.measurement_cov_cols);
+
+  // response의 matrix dimension 필드와 실제 1차원 배열 길이가 일치하는지 확인한다.
+  // 이 검사를 하지 않으면 아래 at()에서 예외가 나거나, 더 나쁘게는 잘못된 H/R로 EKF update가 들어갈 수 있다.
+  const size_t expected_jacobian_size = static_cast<size_t>(jacobian_rows) * static_cast<size_t>(jacobian_cols);
+  const size_t expected_measurement_cov_size = static_cast<size_t>(measurement_cov_rows) * static_cast<size_t>(measurement_cov_cols);
+
+  if (snapshot_srv.response.jacobian_row_major.size() != expected_jacobian_size ||
+      snapshot_srv.response.measurement_cov_row_major.size() != expected_measurement_cov_size) {
+    update.accepted = false;
+    if (matlab_snapshot_debug_log) {
+      PRINT_DEBUG("MATLAB constraint rejected due to malformed matrix payloads: H=%u x %u has %zu values, R=%u x %u has %zu values\n",
+                  snapshot_srv.response.jacobian_rows, snapshot_srv.response.jacobian_cols,
+                  snapshot_srv.response.jacobian_row_major.size(),
+                  snapshot_srv.response.measurement_cov_rows, snapshot_srv.response.measurement_cov_cols,
+                  snapshot_srv.response.measurement_cov_row_major.size());
+    }
+    return true;
+  }
+
+  // residual r을 Eigen::VectorXd로 복사한다.
+  // StateHelper::EKFUpdate()는 dx = K * res 형태를 쓰므로 residual 부호 convention을 MATLAB과 맞춰야 한다.
+  update.r.resize(residual_rows);
+  for (int r = 0; r < residual_rows; r++) {
+    update.r(r) = snapshot_srv.response.residual.at(r);
+  }
+
+  // MATLAB이 row-major로 펼쳐 보낸 H를 Eigen 행렬로 복원한다.
+  // H column 순서는 VioManager의 H_order와 같아야 한다:
+  // [position_error(3), orientation_error(3)] for the t_k clone.
+  update.H.resize(jacobian_rows, jacobian_cols);
+  for (int r = 0; r < jacobian_rows; r++) {
+    for (int c = 0; c < jacobian_cols; c++) {
+      update.H(r, c) = snapshot_srv.response.jacobian_row_major.at(jacobian_cols * r + c);
     }
   }
+
+  // MATLAB이 row-major로 펼쳐 보낸 measurement noise covariance R을 복원한다.
+  // R은 residual dimension과 같은 정방행렬이어야 하며, 최종 dimension 검사는 VioManager에서 한 번 더 수행한다.
+  update.R.resize(measurement_cov_rows, measurement_cov_cols);
+  for (int r = 0; r < measurement_cov_rows; r++) {
+    for (int c = 0; c < measurement_cov_cols; c++) {
+      update.R(r, c) = snapshot_srv.response.measurement_cov_row_major.at(measurement_cov_cols * r + c);
+    }
+  }
+
+  // 여기까지 오면 service 호출과 payload 복원이 성공했다는 뜻이다.
+  // 실제 EKF update 적용 여부는 VioManager가 update.accepted와 dimension/finite 검사를 보고 결정한다.
+  return true;
 }
 
+// -----------------------------------------------------------------------------
+// Input setup: subscribe to IMU and camera ROS topics
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> parser) {
 
   // We need a valid parser
@@ -307,6 +427,9 @@ void ROS1Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
   }
 }
 
+// -----------------------------------------------------------------------------
+// Output cycle: publish the current estimator state and visualization products
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::visualize() {
 
   // Return if we have already visualized
@@ -355,6 +478,9 @@ void ROS1Visualizer::visualize() {
   // PRINT_DEBUG(BLUE "[TIME]: %.4f seconds for visualization\n" RESET, time_total);
 }
 
+// -----------------------------------------------------------------------------
+// High-rate odometry: propagate the latest state to each IMU timestamp
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::visualize_odometry(double timestamp) {
 
   // Return if we have not inited
@@ -462,6 +588,9 @@ void ROS1Visualizer::visualize_odometry(double timestamp) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Final report: print calibration, RMSE/NEES, and elapsed time
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::visualize_final() {
 
   // Final time offset value
@@ -548,60 +677,93 @@ void ROS1Visualizer::visualize_final() {
   PRINT_INFO(REDPURPLE "TIME: %.3f seconds\n\n" RESET, (rT2 - rT1).total_microseconds() * 1e-6);
 }
 
+// -----------------------------------------------------------------------------
+// Input callback: IMU propagation and queued camera update release
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::callback_inertial(const sensor_msgs::Imu::ConstPtr &msg) {
 
-  // convert into correct format
+  // ROS sensor_msgs/Imu 메시지를 OpenVINS 내부 형식인 ov_core::ImuData로 변환한다.
+  // timestamp는 ROS header stamp를 초 단위 double로 바꾼 값이다.
   ov_core::ImuData message;
   message.timestamp = msg->header.stamp.toSec();
+
+  // wm: angular velocity [rad/s], am: linear acceleration [m/s^2].
+  // ROS 메시지의 x/y/z 값을 Eigen vector 형태로 복사한다.
   message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
   message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
 
-  // send it to our VIO system
+  // IMU 측정값을 VIO estimator에 넣어 propagation을 수행한다.
+  // 카메라 update 사이에서도 IMU가 들어올 때마다 상태가 계속 전파된다.
   _app->feed_measurement_imu(message);
+
+  // 최신 IMU timestamp 기준으로 high-rate odometry를 publish/visualize한다.
+  // 카메라 update보다 높은 주기로 IMU propagation 결과를 볼 수 있게 해준다.
   visualize_odometry(message.timestamp);
 
-  // If the processing queue is currently active / running just return so we can keep getting measurements
-  // Otherwise create a second thread to do our update in an async manor
-  // The visualization of the state, images, and features will be synchronous with the update!
+  // 이미 다른 thread가 camera_queue를 처리 중이면, 이번 IMU callback에서는 추가 작업을 하지 않는다.
+  // 이렇게 해야 IMU callback이 오래 막히지 않고 다음 IMU 측정을 계속 받을 수 있다.
   if (thread_update_running)
     return;
+
+  // 여기부터는 아직 camera update 처리 thread가 없다는 뜻이다.
+  // flag를 세워 중복 thread 생성을 막고, 아래에서 큐 처리 thread를 만든다.
   thread_update_running = true;
   std::thread thread([&] {
-    // Lock on the queue (prevents new images from appending)
+    // camera_queue를 처리하는 동안 새 image callback이 queue를 동시에 수정하지 못하도록 잠근다.
+    // 이 lock 범위 안에서 queue 검사, camera update, pop_front가 모두 일어난다.
     std::lock_guard<std::mutex> lck(camera_queue_mtx);
 
-    // Count how many unique image streams
+    // 현재 queue 안에 들어와 있는 image stream 종류를 센다.
+    // sensor_ids.at(0)는 해당 CameraData가 어느 카메라 stream에서 왔는지 나타낸다.
     std::map<int, bool> unique_cam_ids;
     for (const auto &cam_msg : camera_queue) {
       unique_cam_ids[cam_msg.sensor_ids.at(0)] = true;
     }
 
-    // If we do not have enough unique cameras then we need to wait
-    // We should wait till we have one of each camera to ensure we propagate in the correct order
+    // 필요한 카메라 stream이 queue에 모두 들어올 때까지 기다린다.
+    // stereo 설정(num_cameras == 2)에서는 좌/우 이미지가 하나의 CameraData로 묶여 들어오므로
+    // unique stream 개수를 1개로 본다. 그 외에는 설정된 카메라 수만큼 기다린다.
     auto params = _app->get_params();
     size_t num_unique_cameras = (params.state_options.num_cameras == 2) ? 1 : params.state_options.num_cameras;
     if (unique_cam_ids.size() == num_unique_cameras) {
 
-      // Loop through our queue and see if we are able to process any of our camera measurements
-      // We are able to process if we have at least one IMU measurement greater than the camera time
+      // 현재 IMU timestamp를 camera clock 기준으로 변환한다.
+      // OpenVINS는 camera timestamp의 측정을 처리하려면 그 시각 이후의 IMU 측정이 적어도 하나 필요하다.
       double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
+
+      // queue의 가장 오래된 camera measurement부터 처리 가능한지 확인한다.
+      // camera timestamp가 현재 IMU-in-camera-clock보다 과거이면, 충분한 IMU propagation이 가능하므로 update한다.
       while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
         auto rT0_1 = boost::posix_time::microsec_clock::local_time();
+
+        // update_dt는 처리 지연 정도를 ms 단위로 출력하기 위한 값이다.
+        // 아래 PRINT_INFO에서는 "%.2f ms behind"로 표시된다.
         double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
+
+        // camera measurement를 estimator에 넣어 MSCKF/SLAM update를 수행한다.
+        // 이 호출 이후 state는 카메라 정보가 반영된 posterior 상태가 된다.
         _app->feed_measurement_camera(camera_queue.at(0));
-        maybe_send_matlab_snapshot_request();
+
+        // update된 state, feature, image 등을 ROS topic으로 publish한다.
         visualize();
+
+        // 처리가 끝난 camera measurement는 queue에서 제거한다.
         camera_queue.pop_front();
+
+        // 이번 camera update와 visualization에 걸린 시간을 계산해 로그로 출력한다.
         auto rT0_2 = boost::posix_time::microsec_clock::local_time();
         double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
         PRINT_INFO(BLUE "[TIME]: %.4f seconds total (%.1f hz, %.2f ms behind)\n" RESET, time_total, 1.0 / time_total, update_dt);
       }
     }
+
+    // queue 처리 thread가 끝났으므로 다음 IMU callback에서 새 update thread를 만들 수 있게 한다.
     thread_update_running = false;
   });
 
-  // If we are single threaded, then run single threaded
-  // Otherwise detach this thread so it runs in the background!
+  // 설정이 single-threaded이면 여기서 thread가 끝날 때까지 기다린다.
+  // multi-threaded이면 detach해서 background에서 camera update가 돌게 하고,
+  // 현재 IMU callback은 바로 반환되어 다음 ROS callback을 받을 수 있게 한다.
   if (!_app->get_params().use_multi_threading_subs) {
     thread.join();
   } else {
@@ -609,6 +771,9 @@ void ROS1Visualizer::callback_inertial(const sensor_msgs::Imu::ConstPtr &msg) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Input callback: monocular image conversion and camera queue insertion
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::callback_monocular(const sensor_msgs::ImageConstPtr &msg0, int cam_id0) {
 
   // Check if we should drop this image
@@ -648,6 +813,9 @@ void ROS1Visualizer::callback_monocular(const sensor_msgs::ImageConstPtr &msg0, 
   std::sort(camera_queue.begin(), camera_queue.end());
 }
 
+// -----------------------------------------------------------------------------
+// Input callback: stereo image conversion and camera queue insertion
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::callback_stereo(const sensor_msgs::ImageConstPtr &msg0, const sensor_msgs::ImageConstPtr &msg1, int cam_id0,
                                      int cam_id1) {
 
@@ -702,6 +870,9 @@ void ROS1Visualizer::callback_stereo(const sensor_msgs::ImageConstPtr &msg0, con
   std::sort(camera_queue.begin(), camera_queue.end());
 }
 
+// -----------------------------------------------------------------------------
+// Output publisher: current IMU pose with covariance and accumulated path
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::publish_state() {
 
   // Get the current state
@@ -762,6 +933,9 @@ void ROS1Visualizer::publish_state() {
   poses_seq_imu++;
 }
 
+// -----------------------------------------------------------------------------
+// Output publisher: tracker history image
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::publish_images() {
 
   // Return if we have already visualized
@@ -790,6 +964,9 @@ void ROS1Visualizer::publish_images() {
   it_pub_tracks.publish(exl_msg);
 }
 
+// -----------------------------------------------------------------------------
+// Output publisher: MSCKF, SLAM, ARUCO, and simulation feature clouds
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::publish_features() {
 
   // Check if we have subscribers
@@ -822,6 +999,9 @@ void ROS1Visualizer::publish_features() {
   pub_points_sim.publish(cloud_SIM);
 }
 
+// -----------------------------------------------------------------------------
+// Output publisher: groundtruth pose/path plus RMSE and NEES bookkeeping
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::publish_groundtruth() {
 
   // Our groundtruth state
@@ -951,6 +1131,9 @@ void ROS1Visualizer::publish_groundtruth() {
   //==========================================================================
 }
 
+// -----------------------------------------------------------------------------
+// Output publisher: loop-closure pose, calibration, feature, and depth products
+// -----------------------------------------------------------------------------
 void ROS1Visualizer::publish_loopclosure_information() {
 
   // Get the current tracks in this frame

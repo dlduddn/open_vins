@@ -63,6 +63,8 @@ namespace ov_msckf {
 
 class VioManager;
 class Simulator;
+struct MatlabConstraintSnapshot;
+struct MatlabConstraintUpdate;
 
 /**
  * @brief Helper class that will publish results onto the ROS framework.
@@ -133,8 +135,8 @@ protected:
   /// Publish loop-closure information of current pose and active track information
   void publish_loopclosure_information();
 
-  /// Synchronously send the latest posterior pose snapshot to the MATLAB ROS service.
-  void maybe_send_matlab_snapshot_request();
+  /// Synchronously request an EKF-ready MATLAB constraint for the provided linearization snapshot.
+  bool request_matlab_constraint_update(const MatlabConstraintSnapshot &snapshot, MatlabConstraintUpdate &update);
 
   /// Global node handler
   std::shared_ptr<ros::NodeHandle> _nh;
