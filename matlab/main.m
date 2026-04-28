@@ -9,13 +9,12 @@
 %% ROS Service Server
 % MATLAB   : Server
 % OpenVINS : Client
-rosshutdown
+addpath mapMatching\
 server = start_pose_snapshot_server("http://192.168.1.56:11311", "192.168.1.254");
 
 %% Termination
-delete(server);
-rosshutdown
 clear all
+rosshutdown
 
 %% Results
 positions = reshape([pose_history.position], 3, []).';
