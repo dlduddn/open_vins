@@ -213,6 +213,9 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
 // -----------------------------------------------------------------------------
 bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnapshot &snapshot, MatlabConstraintUpdate &update) {
 
+  static uint64_t matlab_request_count = 0;
+  const uint64_t request_index = ++matlab_request_count;
+
   // 설정에서 MATLAB constraint 기능이 꺼져 있으면 estimator 쪽에는 "호출하지 못함"으로 알려준다.
   // 이 경우 VioManager는 외부 constraint 없이 기존 OpenVINS update만 수행한다.
   if (!matlab_snapshot_enable)
@@ -269,8 +272,8 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
   }
 
   if (matlab_snapshot_debug_log) {
-    PRINT_DEBUG("MATLAB constraint request: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]\n",
-                snapshot.timestamp_cam, snapshot.timestamp_imu,
+    PRINT_DEBUG("MATLAB constraint request #%llu: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]\n",
+                (unsigned long long)request_index, snapshot.timestamp_cam, snapshot.timestamp_imu,
                 snapshot.position(0), snapshot.position(1), snapshot.position(2),
                 snapshot.quaternion(0), snapshot.quaternion(1), snapshot.quaternion(2), snapshot.quaternion(3));
   }
@@ -296,10 +299,13 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
   // 동기식 service 호출이다.
   // MATLAB callback이 H/r/R을 계산해서 response를 반환할 때까지 camera update thread가 여기서 대기한다.
   // 따라서 이 함수가 반환된 직후 VioManager가 같은 선형화 기준점에 EKF update를 걸 수 있다.
+  if (matlab_snapshot_debug_log) {
+    PRINT_DEBUG("MATLAB constraint service call begin #%llu\n", (unsigned long long)request_index);
+  }
   const bool call_success = matlab_snapshot_client.call(snapshot_srv);
   if (matlab_snapshot_debug_log) {
-    PRINT_DEBUG("MATLAB constraint service result: success=%d accepted=%d status=\"%s\"\n", (int)call_success,
-                call_success ? (int)snapshot_srv.response.accepted : 0,
+    PRINT_DEBUG("MATLAB constraint service result #%llu: success=%d accepted=%d status=\"%s\"\n",
+                (unsigned long long)request_index, (int)call_success, call_success ? (int)snapshot_srv.response.accepted : 0,
                 call_success ? snapshot_srv.response.status_message.c_str() : "");
   }
 
