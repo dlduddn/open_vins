@@ -1,6 +1,5 @@
 function server = start_pose_snapshot_server(masterURI, nodeHost)
 % ROS1 MATLAB service server for OpenVINS pose snapshot requests.
-%
 % 이 함수는 OpenVINS C++ 노드가 보낸 pose snapshot 서비스 요청을
 % MATLAB에서 받아서 검증한 뒤, base workspace의 last_pose와 pose_history에 저장한다.
     
@@ -18,7 +17,7 @@ function server = start_pose_snapshot_server(masterURI, nodeHost)
 
     % ROS callback은 MATLAB/ROS 내부 컨텍스트에서 실행되므로 상태는 base
     % workspace에 명시적으로 저장한다.
-    assignin("base", "pose_history", struct([]));
+    assignin("base", "pose", struct([]));
 
     % ROS 서비스 서버를 생성한다. DataFormat을 struct로 맞춰 req/resp 필드를
     % MATLAB 구조체처럼 접근한다.
@@ -26,89 +25,82 @@ function server = start_pose_snapshot_server(masterURI, nodeHost)
         "DataFormat", "struct");
 
     fprintf("[MATLAB] Service ready: %s [%s]\n", SERVICE_NAME, SERVICE_TYPE);
-    fprintf("[MATLAB] Latest request will be stored in base workspace as 'last_pose'.\n");
-    fprintf("[MATLAB] All accepted requests will be appended to 'pose_history'.\n");
+    fprintf("[MATLAB] All accepted requests will be appended to 'pose'.\n");
 
     function resp = poseSnapshotCallback(~, req, resp)
         try
-            % ROS service request 필드를 MATLAB에서 다루기 쉬운 double 배열로 변환한다.
-            % Quaternion은 OpenVINS/JPL 관례의 [x y z w] 순서를 그대로 보존한다.
+            % =========================== Request =============================
+            % Request 필드 =double 배열로 변환
             snapshot = struct();
             snapshot.t_cam = double(req.TimestampCam);
             snapshot.t_imu = double(req.TimestampImu);
             snapshot.position = double(req.Position(:));
-            snapshot.quaternion = double(req.Quaternion(:));
+            snapshot.quaternion = double(req.Quaternion(:)); % [x y z w]
             snapshot.pose_covariance_row_major = double(req.PoseCovarianceRowMajor(:));
-            [ok, errMsg, cov6x6] = validateSnapshot(snapshot);
+            snapshot.pose_covariance = reshape(snapshot.pose_covariance_row_major, 6, 6).';
 
             % 필수 필드가 비정상이면 C++ 클라이언트에 거절 응답을 보내고 종료한다.
+            [ok, errMsg] = validateSnapshot(snapshot);  
             if ~ok
-                resp = writeConstraintResponse(resp, emptyConstraint(false, errMsg));
+                resp = writeResponse(resp, computeConstraint([], false, errMsg));
                 fprintf(2, "[MATLAB] Rejected snapshot: %s\n", errMsg);
                 return;
             end
-
-            % 검증이 끝난 covariance는 MATLAB 행렬 형태로 함께 저장한다.
-            snapshot.pose_covariance = cov6x6;
-            snapshot.received_at = datetime("now", ...
-                "TimeZone", "local", ...
-                "Format", "yyyy-MM-dd HH:mm:ss.SSS");
-
-            % 사용자가 바로 확인할 수 있게 base workspace에 최신 snapshot과
-            % 누적 history를 기록한다.
-            history_count = appendSnapshotToHistory(snapshot);
+     
+            % 사용자가 바로 확인할 수 있게 snapshot을 누적한다.
+            history_count = stackSnapshot(snapshot);
 
             % MATLAB 콘솔에 주요 pose 정보를 출력한다.
-            fprintf("[MATLAB] Snapshot received index=%d t_cam=%.9f t_imu=%.9f\n", ...
-                history_count, snapshot.t_cam, snapshot.t_imu);
-            fprintf("  pos   : [%.6f %.6f %.6f]\n", snapshot.position);
-            fprintf("  quat  : [%.6f %.6f %.6f %.6f]\n", snapshot.quaternion);
+            fprintf("  index = %d\n", history_count);
+            fprintf("  t_cam = %.9f\n", snapshot.t_cam);
+            fprintf("  t_imu = %.9f\n", snapshot.t_imu);
+            fprintf("  pos   = [%.6f %.6f %.6f]\n", snapshot.position);
+            fprintf("  quat  = [%.6f %.6f %.6f %.6f]\n", snapshot.quaternion);
+            % ==================================================================
 
             % =========================== Response =============================
             constraint = computeConstraint(snapshot);
 
-            [ok, errMsg] = validateConstraintPayload(constraint);
+            [ok, errMsg] = validateConstraint(constraint);
             if ~ok
                 fprintf(2, "[MATLAB] Rejected constraint response: %s\n", errMsg);
-                constraint = emptyConstraint(false, errMsg);
+                constraint = computeConstraint(snapshot, false, errMsg);
             end
 
-            resp = writeConstraintResponse(resp, constraint);
+            resp = writeResponse(resp, constraint);
             % ==================================================================
 
         catch ME
             errMsg = sprintf("MATLAB callback error: %s", ME.message);
             fprintf(2, "[MATLAB] %s\n", errMsg);
-            resp = writeConstraintResponse(resp, emptyConstraint(false, errMsg));
+            resp = writeResponse(resp, computeConstraint([], false, errMsg));
         end
     end
 
 end
 
-function history_count = appendSnapshotToHistory(snapshot)
-    if evalin("base", "exist('pose_history', 'var')")
-        pose_history = evalin("base", "pose_history");
+function history_count = stackSnapshot(snapshot)
+    if evalin("base", "exist('pose', 'var')")
+        pose = evalin("base", "pose");
     else
-        pose_history = struct([]);
+        pose = struct([]);
     end
 
-    if isempty(pose_history)
-        pose_history = snapshot;
+    if isempty(pose)
+        pose = snapshot;
     else
-        pose_history(end + 1) = snapshot;
+        pose(end + 1) = snapshot;
     end
 
-    assignin("base", "last_pose", snapshot);
-    assignin("base", "pose_history", pose_history);
-    history_count = numel(pose_history);
+    assignin("base", "pose", pose);
+    history_count = numel(pose);
 end
 
-function [ok, errMsg, cov6x6] = validateSnapshot(snapshot)
+function [ok, errMsg] = validateSnapshot(snapshot)
     % ROS request에서 받은 값들이 MATLAB 분석에 사용할 수 있는 형태인지 확인한다.
     % 실패 시 ok=false와 사람이 읽을 수 있는 오류 메시지를 반환한다.
     ok = false;
     errMsg = '';
-    cov6x6 = [];
 
     % 카메라/IMU timestamp는 단일 유한 실수여야 한다.
     if ~isscalar(snapshot.t_cam) || ~isfinite(snapshot.t_cam)
@@ -140,40 +132,10 @@ function [ok, errMsg, cov6x6] = validateSnapshot(snapshot)
         return;
     end
 
-    % C++ row-major 36-vector -> MATLAB 6x6 matrix.
-    % MATLAB reshape는 column-major 기준이므로 transpose를 적용해 원래 행 순서를 복원한다.
-    cov6x6 = reshape(snapshot.pose_covariance_row_major, 6, 6).';
-
     ok = true;
 end
 
-function constraint = computeConstraint(snapshot)
-    % TODO: Replace this template with the real MATLAB-side constraint.
-    %
-    % C++ expects:
-    %   residual: m x 1
-    %   jacobian: m x 6
-    %   measurement_cov: m x m
-    %
-    % Jacobian columns must follow:
-    %   [position_error(3), orientation_error(3)]
-    %
-    % Residual convention should match OpenVINS EKFUpdate(), which applies:
-    %   dx = K * residual
-    %
-    % For now this is a no-op debug constraint. It exercises the MATLAB->C++
-    % response path without changing state or covariance.
-    constraint = struct();
-    constraint.accepted = false;
-    constraint.status_message = sprintf( ...
-        "snapshot received; TODO no-op constraint returned at t_cam=%.9f", ...
-        snapshot.t_cam);
-    constraint.residual = 0;
-    constraint.jacobian = zeros(1, 6);
-    constraint.measurement_cov = 1;
-end
-
-function [ok, errMsg] = validateConstraintPayload(constraint)
+function [ok, errMsg] = validateConstraint(constraint)
     % Ensure the response shape is exactly what the C++ EKF bridge expects.
     ok = false;
     errMsg = '';
@@ -216,16 +178,55 @@ function [ok, errMsg] = validateConstraintPayload(constraint)
     ok = true;
 end
 
-function constraint = emptyConstraint(accepted, statusMessage)
+function constraint = computeConstraint(snapshot, accepted, statusMessage)
+    % TODO: Replace this template with the real MATLAB-side constraint.
+    %
+    % C++ expects:
+    %   residual: m x 1
+    %   jacobian: m x 6
+    %   measurement_cov: m x m
+    %
+    % Jacobian columns must follow:
+    %   [position_error(3), orientation_error(3)]
+    %
+    % Residual convention should match OpenVINS EKFUpdate(), which applies:
+    %   dx = K * residual
+    %
+    % For now this returns a rejected no-op constraint. It exercises the
+    % MATLAB->C++ response path without changing state or covariance.
+    if nargin < 2
+        accepted = false;
+    end
+    if nargin < 3
+        if isempty(snapshot)
+            statusMessage = "snapshot rejected";
+        else
+            statusMessage = sprintf( ...
+                "snapshot received; TODO no-op constraint returned at t_cam=%.9f", ...
+                snapshot.t_cam);
+        end
+    end
+
     constraint = struct();
     constraint.accepted = logical(accepted);
     constraint.status_message = char(statusMessage);
-    constraint.residual = zeros(0, 1);
-    constraint.jacobian = zeros(0, 6);
-    constraint.measurement_cov = zeros(0, 0);
+
+    if ~constraint.accepted
+        constraint.residual = 0;
+        constraint.jacobian = zeros(1, 6);
+        constraint.measurement_cov = 1;
+        return;
+    end
+
+    % =========================== TO-DO =============================
+    constraint.residual = 0;
+    constraint.jacobian = zeros(1, 6);
+    constraint.measurement_cov = 1;
+    % ===============================================================
+
 end
 
-function resp = writeConstraintResponse(resp, constraint)
+function resp = writeResponse(resp, constraint)
     % MATLAB stores matrices column-major, while the ROS payload is row-major.
     residual = double(constraint.residual(:));
     H = double(constraint.jacobian);
