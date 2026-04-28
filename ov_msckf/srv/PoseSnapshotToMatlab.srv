@@ -1,5 +1,6 @@
 # Request: C++ OpenVINS node -> MATLAB
-# The pose/covariance are for the t_k IMU clone after OpenVINS visual updates.
+# The pose/covariance are for the selected OpenVINS pose state.
+# Visual updates use the t_k IMU clone; ZUPT updates use the active IMU pose.
 # pose_covariance_row_major is ordered as [position_error(3), orientation_error(3)].
 float64 timestamp_cam
 float64 timestamp_imu
@@ -12,7 +13,7 @@ float64[36] pose_covariance_row_major
 # Response: MATLAB -> C++
 # EKF residual r, Jacobian H, and measurement noise R.
 # H columns must match the request covariance order:
-# [position_error(3), orientation_error(3)] for the t_k clone.
+# [position_error(3), orientation_error(3)] for the selected pose state.
 bool accepted
 string status_message
 float64[] residual

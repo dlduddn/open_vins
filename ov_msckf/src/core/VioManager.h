@@ -44,6 +44,9 @@ class FeatureInitializer;
 namespace ov_init {
 class InertialInitializer;
 } // namespace ov_init
+namespace ov_type {
+class Type;
+} // namespace ov_type
 
 namespace ov_msckf {
 
@@ -54,10 +57,12 @@ class UpdaterSLAM;
 class UpdaterZeroVelocity;
 class Propagator;
 
-/// Snapshot of the clone pose used as the MATLAB constraint linearization point.
+/// Snapshot of the pose state used as the MATLAB constraint linearization point.
 struct MatlabConstraintSnapshot {
   double timestamp_cam = -1;
   double timestamp_imu = -1;
+  // True for the normal visual-update path, where timelastupdate will be set before visualize() runs.
+  bool will_complete_visual_update = false;
   Eigen::Vector3d position = Eigen::Vector3d::Zero();
   Eigen::Vector4d quaternion = Eigen::Vector4d::Zero();
   Eigen::Matrix<double, 6, 6> pose_covariance = Eigen::Matrix<double, 6, 6>::Zero();
@@ -132,7 +137,7 @@ public:
   /// Accessor to get the current propagator
   std::shared_ptr<Propagator> get_propagator() { return propagator; }
 
-  /// Optional synchronous callback that returns an EKF-ready MATLAB constraint for the current clone.
+  /// Optional synchronous callback that returns an EKF-ready MATLAB constraint for the selected pose state.
   void set_matlab_constraint_callback(MatlabConstraintCallback callback) { matlab_constraint_callback = callback; }
 
   /// Get a nice visualization image of what tracks we have
@@ -180,10 +185,30 @@ protected:
 
   /**
    * @brief Query MATLAB for a constraint linearized at the current image clone and immediately apply it.
-   * @param message Contains the image timestamp used to find the t_k IMU clone
+   * @param timestamp Camera timestamp used to find the t_k IMU clone
    * @return True if a MATLAB constraint was accepted and applied
    */
-  bool try_apply_matlab_constraint_update(const ov_core::CameraData &message);
+  bool try_apply_matlab_constraint_update(double timestamp);
+
+  /**
+   * @brief Query MATLAB for a constraint linearized at the active IMU pose and immediately apply it.
+   * @param timestamp Camera timestamp of the current ZUPT update
+   * @return True if a MATLAB constraint was accepted and applied
+   */
+  bool try_apply_matlab_constraint_update_current_imu(double timestamp);
+
+  /**
+   * @brief Common MATLAB constraint request/update path for a selected 6-DoF pose state.
+   * @param timestamp Camera timestamp of the current update
+   * @param pose_order State variable order matching MATLAB's [position_error, orientation_error] Jacobian columns
+   * @param position Linearization-point position sent to MATLAB
+   * @param quaternion Linearization-point quaternion sent to MATLAB
+   * @param source_label Human-readable pose source label for diagnostics
+   * @return True if a MATLAB constraint was accepted and applied
+   */
+  bool try_apply_matlab_constraint_update_for_pose(double timestamp, const std::vector<std::shared_ptr<ov_type::Type>> &pose_order,
+                                                   const Eigen::Vector3d &position, const Eigen::Vector4d &quaternion,
+                                                   const char *source_label, bool will_complete_visual_update);
 
   /**
    * @brief This function will try to initialize the state.

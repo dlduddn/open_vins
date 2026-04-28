@@ -233,6 +233,12 @@ void VioManager::feed_measurement_simulation(double timestamp, const std::vector
     }
     if (did_zupt_update) {
       assert(state->_timestamp == timestamp);
+
+      // Simulation 입력에서도 ZUPT는 clone 없이 종료되므로, 현재 IMU pose 기준으로 MATLAB service를 호출한다.
+      if (try_apply_matlab_constraint_update_current_imu(timestamp)) {
+        propagator->invalidate_cache();
+      }
+
       propagator->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
       updaterZUPT->clean_old_imu_measurements(timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
       propagator->invalidate_cache();
@@ -330,6 +336,12 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
     if (did_zupt_update) {
       assert(state->_timestamp == message.timestamp);
 
+      // ZUPT 경로에서는 현재 frame clone을 만들지 않고 종료하므로,
+      // MATLAB service는 현재 IMU pose를 선형화 기준으로 호출한다.
+      if (try_apply_matlab_constraint_update_current_imu(message.timestamp)) {
+        propagator->invalidate_cache();
+      }
+
       // 이미 사용했거나 충분히 오래된 IMU 측정은 propagation/ZUPT 버퍼에서 제거한다.
       // camera timestamp를 IMU clock으로 바꾼 뒤 약간의 여유 0.10초를 남긴다.
       propagator->clean_old_imu_measurements(message.timestamp + state->_calib_dt_CAMtoIMU->value()(0) - 0.10);
@@ -360,7 +372,7 @@ void VioManager::track_image_and_update(const ov_core::CameraData &message_const
   do_feature_propagate_update(message);
 }
 
-bool VioManager::try_apply_matlab_constraint_update(const ov_core::CameraData &message) {
+bool VioManager::try_apply_matlab_constraint_update(double timestamp) {
 
   // ROS wrapper(ROS1Visualizer)가 MATLAB callback을 등록하지 않았다면
   // 외부 constraint 없이 기본 OpenVINS 흐름으로만 동작한다.
@@ -369,9 +381,9 @@ bool VioManager::try_apply_matlab_constraint_update(const ov_core::CameraData &m
 
   // MATLAB 외부 측정은 현재 camera frame과 같은 timestamp에 정렬되어 있다고 가정한다.
   // 따라서 직접 update할 state 변수는 camera timestamp t_k에 해당하는 IMU clone pose이다.
-  auto clone_it = state->_clones_IMU.find(message.timestamp);
+  auto clone_it = state->_clones_IMU.find(timestamp);
   if (clone_it == state->_clones_IMU.end()) {
-    PRINT_WARNING(YELLOW "[MATLAB]: no IMU clone for camera timestamp %.9f; skipping external constraint\n" RESET, message.timestamp);
+    PRINT_WARNING(YELLOW "[MATLAB]: no IMU clone for camera timestamp %.9f; skipping external constraint\n" RESET, timestamp);
     return false;
   }
   const std::shared_ptr<PoseJPL> clone = clone_it->second;
@@ -380,13 +392,38 @@ bool VioManager::try_apply_matlab_constraint_update(const ov_core::CameraData &m
   // 순서는 이 clone의 [position_error(3), orientation_error(3)]이다.
   std::vector<std::shared_ptr<Type>> pose_order = {clone->p(), clone->q()};
 
+  return try_apply_matlab_constraint_update_for_pose(timestamp, pose_order, clone->pos(), clone->quat(), "clone", true);
+}
+
+bool VioManager::try_apply_matlab_constraint_update_current_imu(double timestamp) {
+
+  // ZUPT는 새 image clone을 만들지 않으므로, 같은 service payload를 현재 active IMU pose 기준으로 구성한다.
+  if (state == nullptr || state->_imu == nullptr)
+    return false;
+
+  std::vector<std::shared_ptr<Type>> pose_order = {state->_imu->p(), state->_imu->q()};
+  return try_apply_matlab_constraint_update_for_pose(timestamp, pose_order, state->_imu->pos(), state->_imu->quat(), "current IMU", false);
+}
+
+bool VioManager::try_apply_matlab_constraint_update_for_pose(double timestamp, const std::vector<std::shared_ptr<Type>> &pose_order,
+                                                             const Eigen::Vector3d &position, const Eigen::Vector4d &quaternion,
+                                                             const char *source_label, bool will_complete_visual_update) {
+
+  // ROS wrapper(ROS1Visualizer)가 MATLAB callback을 등록하지 않았다면
+  // 외부 constraint 없이 기본 OpenVINS 흐름으로만 동작한다.
+  if (!matlab_constraint_callback || state == nullptr)
+    return false;
+
+  const char *source = (source_label != nullptr) ? source_label : "pose";
+
   // MATLAB service request에 넘길 선형화 기준 snapshot을 구성한다.
-  // position/quaternion은 t_k clone의 pose이고, covariance도 같은 pose_order 기준 6x6 marginal covariance이다.
+  // position/quaternion은 선택된 6-DoF pose이고, covariance도 같은 pose_order 기준 6x6 marginal covariance이다.
   MatlabConstraintSnapshot snapshot;
-  snapshot.timestamp_cam = message.timestamp;
-  snapshot.timestamp_imu = message.timestamp + state->_calib_dt_CAMtoIMU->value()(0);
-  snapshot.position = clone->pos();
-  snapshot.quaternion = clone->quat();
+  snapshot.timestamp_cam = timestamp;
+  snapshot.timestamp_imu = timestamp + state->_calib_dt_CAMtoIMU->value()(0);
+  snapshot.will_complete_visual_update = will_complete_visual_update;
+  snapshot.position = position;
+  snapshot.quaternion = quaternion;
   snapshot.pose_covariance = StateHelper::get_marginal_covariance(state, pose_order);
 
   // NaN/Inf가 포함된 snapshot을 MATLAB으로 보내면 MATLAB 계산 또는 EKF update가 깨질 수 있다.
@@ -394,7 +431,7 @@ bool VioManager::try_apply_matlab_constraint_update(const ov_core::CameraData &m
   const bool snapshot_finite = std::isfinite(snapshot.timestamp_cam) && std::isfinite(snapshot.timestamp_imu) &&
                                all_finite(snapshot.position) && all_finite(snapshot.quaternion) && all_finite(snapshot.pose_covariance);
   if (!snapshot_finite) {
-    PRINT_WARNING(YELLOW "[MATLAB]: non-finite clone snapshot at %.9f; skipping external constraint\n" RESET, message.timestamp);
+    PRINT_WARNING(YELLOW "[MATLAB]: non-finite %s snapshot at %.9f; skipping external constraint\n" RESET, source, timestamp);
     return false;
   }
 
@@ -434,7 +471,7 @@ bool VioManager::try_apply_matlab_constraint_update(const ov_core::CameraData &m
   // MATLAB constraint를 EKF update로 적용한다.
   // pose_order가 H의 column 순서와 반드시 일치해야 올바른 state block이 update된다.
   StateHelper::EKFUpdate(state, pose_order, update.H, update.r, update.R);
-  PRINT_DEBUG(BLUE "[MATLAB]: applied external constraint at %.9f (%d residuals)\n" RESET, message.timestamp, rows);
+  PRINT_DEBUG(BLUE "[MATLAB]: applied external constraint at %.9f using %s (%d residuals)\n" RESET, timestamp, source, rows);
   return true;
 }
 
@@ -465,11 +502,6 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
   if ((int)state->_clones_IMU.size() < std::min(state->_options.max_clone_size, 5)) {
     PRINT_DEBUG("waiting for enough clone states (%d of %d)....\n", (int)state->_clones_IMU.size(),
                 std::min(state->_options.max_clone_size, 5));
-    // There is no visual update yet, so the best available linearization point is
-    // the freshly propagated t_k clone.
-    if (try_apply_matlab_constraint_update(message)) {
-      propagator->invalidate_cache();
-    }
     return;
   }
 
@@ -689,7 +721,7 @@ void VioManager::do_feature_propagate_update(const ov_core::CameraData &message)
 
   // MATLAB extension: use the post-visual-update clone at this image timestamp as the
   // linearization point, then immediately apply the returned H/r/R before cleanup/marginalization.
-  if (try_apply_matlab_constraint_update(message)) {
+  if (try_apply_matlab_constraint_update(message.timestamp)) {
     propagator->invalidate_cache();
   }
 

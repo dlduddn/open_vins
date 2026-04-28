@@ -237,7 +237,7 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
 }
 
 // -----------------------------------------------------------------------------
-// MATLAB extension: request a linearized constraint for a specific clone snapshot
+// MATLAB extension: request a linearized constraint for a selected pose-state snapshot
 // -----------------------------------------------------------------------------
 bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnapshot &snapshot, MatlabConstraintUpdate &update) {
 
@@ -253,6 +253,26 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
       PRINT_DEBUG("Skipping MATLAB constraint request because service name is empty.\n");
     } else {
       ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB constraint request because matlab_snapshot_service_name is empty.");
+    }
+    return false;
+  }
+
+  // Keep MATLAB requests aligned with the same output gate used by visualize().
+  // Normal visual updates set will_complete_visual_update because timelastupdate
+  // is updated after this callback returns; ZUPT does not, so it must already pass
+  // _app->initialized() to be a publish_state candidate.
+  const std::shared_ptr<State> state = _app->get_state();
+  const bool will_be_initialized_for_visualize = _app->initialized() || snapshot.will_complete_visual_update;
+  if (!will_be_initialized_for_visualize) {
+    if (matlab_snapshot_debug_log) {
+      PRINT_DEBUG("Skipping MATLAB constraint request because visualize() would not publish an initialized state at %.9f.\n",
+                  snapshot.timestamp_cam);
+    }
+    return false;
+  }
+  if (state != nullptr && last_visualization_timestamp == state->_timestamp) {
+    if (matlab_snapshot_debug_log) {
+      PRINT_DEBUG("Skipping MATLAB constraint request because visualize() already handled timestamp %.9f.\n", state->_timestamp);
     }
     return false;
   }
@@ -273,7 +293,8 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
   }
 
   // ROS service request 메시지를 만든다.
-  // 여기 담기는 pose는 현재 IMU state가 아니라, VioManager가 선택한 t_k clone pose이다.
+  // 여기 담기는 pose는 VioManager가 선택한 선형화 기준 pose이다.
+  // 일반 visual update에서는 t_k clone이고, ZUPT 경로에서는 active IMU pose이다.
   ov_msckf::PoseSnapshotToMatlab snapshot_srv;
   snapshot_srv.request.timestamp_cam = snapshot.timestamp_cam;
   snapshot_srv.request.timestamp_imu = snapshot.timestamp_imu;
@@ -353,7 +374,7 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
 
   // MATLAB이 row-major로 펼쳐 보낸 H를 Eigen 행렬로 복원한다.
   // H column 순서는 VioManager의 H_order와 같아야 한다:
-  // [position_error(3), orientation_error(3)] for the t_k clone.
+  // [position_error(3), orientation_error(3)] for the selected pose state.
   update.H.resize(jacobian_rows, jacobian_cols);
   for (int r = 0; r < jacobian_rows; r++) {
     for (int c = 0; c < jacobian_cols; c++) {
