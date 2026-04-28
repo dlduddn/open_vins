@@ -32,7 +32,11 @@
 #include "utils/print.h"
 #include "utils/sensor_data.h"
 
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <memory>
+#include <thread>
 
 using namespace ov_core;
 using namespace ov_type;
@@ -45,6 +49,27 @@ using namespace ov_msckf;
 namespace {
 
 template <typename Derived> bool all_finite(const Eigen::MatrixBase<Derived> &value) { return value.array().isFinite().all(); }
+
+bool wait_for_service_wall(ros::ServiceClient &client, double timeout_sec) {
+
+  if (timeout_sec <= 0.0)
+    return true;
+
+  const ros::WallTime deadline = ros::WallTime::now() + ros::WallDuration(timeout_sec);
+  while (ros::ok()) {
+    if (client.exists())
+      return true;
+    if (ros::WallTime::now() >= deadline)
+      return false;
+    ros::WallDuration(0.02).sleep();
+  }
+  return false;
+}
+
+void sleep_wall(double seconds) {
+  if (seconds > 0.0)
+    ros::WallDuration(seconds).sleep();
+}
 
 } // namespace
 
@@ -63,6 +88,9 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
   matlab_snapshot_enable = params.matlab_snapshot_enable;
   matlab_snapshot_service_name = params.matlab_snapshot_service_name;
   matlab_snapshot_timeout_sec = params.matlab_snapshot_timeout_sec;
+  matlab_snapshot_call_timeout_sec = params.matlab_snapshot_call_timeout_sec;
+  matlab_snapshot_retry_delay_sec = params.matlab_snapshot_retry_delay_sec;
+  matlab_snapshot_max_retries = params.matlab_snapshot_max_retries;
   matlab_snapshot_debug_log = params.matlab_snapshot_debug_log;
 
   // TF broadcaster를 만든다.
@@ -268,28 +296,9 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
     }
   }
 
-  // MATLAB service server가 ROS master에 등록되어 있는지 확인한다.
-  // timeout이 양수이면 해당 시간만큼 등록을 기다리고, 0 이하이면 현재 존재 여부만 즉시 확인한다.
-  // 주의: 이 timeout은 service 등록 대기 시간이고, 아래 call() 자체의 실행 시간 제한은 아니다.
-  const bool service_available = (matlab_snapshot_timeout_sec > 0.0)
-                                     ? matlab_snapshot_client.waitForExistence(ros::Duration(matlab_snapshot_timeout_sec))
-                                     : matlab_snapshot_client.exists();
-  if (!service_available) {
-    if (matlab_snapshot_debug_log) {
-      PRINT_DEBUG("MATLAB constraint service unavailable: %s (timeout=%.3f sec)\n", matlab_snapshot_service_name.c_str(),
-                  matlab_snapshot_timeout_sec);
-    } else {
-      ROS_WARN_STREAM_THROTTLE(5.0, "Skipping MATLAB constraint request because service '" << matlab_snapshot_service_name
-                                                                                            << "' is unavailable (timeout="
-                                                                                            << matlab_snapshot_timeout_sec << " sec).");
-    }
-    return false;
-  }
-
-  // 동기식 service 호출이다.
-  // MATLAB callback이 H/r/R을 계산해서 response를 반환할 때까지 camera update thread가 여기서 대기한다.
-  // 따라서 이 함수가 반환된 직후 VioManager가 같은 선형화 기준점에 EKF update를 걸 수 있다.
-  const bool call_success = matlab_snapshot_client.call(snapshot_srv);
+  // 동기식 MATLAB service 호출은 transport가 stuck될 수 있으므로 watchdog으로
+  // 끊고 fresh client로 재시도한다. max_retries <= 0이면 VIO를 pause하고 계속 재시도한다.
+  const bool call_success = call_matlab_snapshot_service_with_retry(snapshot_srv);
 
   // call_success=false는 ROS service transport 자체가 실패한 경우이다.
   // MATLAB이 계산은 했지만 constraint를 쓰지 않겠다고 판단한 경우는 accepted=false로 구분한다.
@@ -364,6 +373,98 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
   // 여기까지 오면 service 호출과 payload 복원이 성공했다는 뜻이다.
   // 실제 EKF update 적용 여부는 VioManager가 update.accepted와 dimension/finite 검사를 보고 결정한다.
   return true;
+}
+
+bool ROS1Visualizer::call_matlab_snapshot_service_with_retry(ov_msckf::PoseSnapshotToMatlab &snapshot_srv) {
+
+  const double call_timeout_sec = (matlab_snapshot_call_timeout_sec > 0.0) ? matlab_snapshot_call_timeout_sec : 1.0;
+  const double retry_delay_sec = (matlab_snapshot_retry_delay_sec > 0.0) ? matlab_snapshot_retry_delay_sec : 0.0;
+  const bool retry_forever = (matlab_snapshot_max_retries <= 0);
+  int attempt = 0;
+
+  while (ros::ok()) {
+    attempt++;
+
+    ros::ServiceClient client = _nh->serviceClient<ov_msckf::PoseSnapshotToMatlab>(matlab_snapshot_service_name, false);
+
+    // MATLAB service server가 ROS master에 등록되어 있는지 확인한다.
+    // rosbag/use_sim_time 환경에서도 멈추지 않도록 wall-clock 기준으로 기다린다.
+    const bool service_available = wait_for_service_wall(client, matlab_snapshot_timeout_sec);
+    if (!service_available) {
+      if (attempt == 1 || attempt % 10 == 0) {
+        PRINT_WARNING(YELLOW "[MATLAB]: service '%s' unavailable on attempt %d; retrying in %.3f sec\n" RESET,
+                      matlab_snapshot_service_name.c_str(), attempt, retry_delay_sec);
+      }
+      client.shutdown();
+      if (!retry_forever && attempt >= matlab_snapshot_max_retries)
+        return false;
+      sleep_wall(retry_delay_sec);
+      continue;
+    }
+
+    struct CallState {
+      std::mutex mutex;
+      std::condition_variable cv;
+      bool finished = false;
+      bool call_success = false;
+    };
+
+    auto call_state = std::make_shared<CallState>();
+    auto call_client = std::make_shared<ros::ServiceClient>(std::move(client));
+    auto attempt_srv = std::make_shared<ov_msckf::PoseSnapshotToMatlab>(snapshot_srv);
+
+    std::thread call_thread([call_state, call_client, attempt_srv] {
+      const bool success = call_client->call(*attempt_srv);
+      {
+        std::lock_guard<std::mutex> lock(call_state->mutex);
+        call_state->call_success = success;
+        call_state->finished = true;
+      }
+      call_state->cv.notify_one();
+    });
+
+    bool finished_in_time = false;
+    {
+      std::unique_lock<std::mutex> lock(call_state->mutex);
+      const auto timeout_duration = std::chrono::duration<double>(call_timeout_sec);
+      finished_in_time = call_state->cv.wait_for(lock, timeout_duration, [&] { return call_state->finished; });
+    }
+
+    if (!finished_in_time) {
+      call_client->shutdown();
+      call_thread.detach();
+      PRINT_WARNING(YELLOW "[MATLAB]: service call timed out after %.3f sec on attempt %d; reconnecting\n" RESET, call_timeout_sec,
+                    attempt);
+
+      if (!retry_forever && attempt >= matlab_snapshot_max_retries)
+        return false;
+
+      sleep_wall(retry_delay_sec);
+      continue;
+    }
+
+    if (call_thread.joinable())
+      call_thread.join();
+
+    call_client->shutdown();
+
+    if (call_state->call_success) {
+      snapshot_srv.response = attempt_srv->response;
+      if (attempt > 1) {
+        PRINT_INFO(GREEN "[MATLAB]: service call recovered on attempt %d\n" RESET, attempt);
+      }
+      return true;
+    }
+
+    PRINT_WARNING(YELLOW "[MATLAB]: service call failed on attempt %d; reconnecting\n" RESET, attempt);
+
+    if (!retry_forever && attempt >= matlab_snapshot_max_retries)
+      return false;
+
+    sleep_wall(retry_delay_sec);
+  }
+
+  return false;
 }
 
 // -----------------------------------------------------------------------------

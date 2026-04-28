@@ -109,6 +109,15 @@ struct VioManagerOptions {
   /// Max time to wait for the MATLAB snapshot service to become available before skipping
   double matlab_snapshot_timeout_sec = 0.0;
 
+  /// Max time to wait for a single MATLAB service call before reconnecting
+  double matlab_snapshot_call_timeout_sec = 1.0;
+
+  /// Time to wait between MATLAB service reconnect attempts
+  double matlab_snapshot_retry_delay_sec = 0.2;
+
+  /// Max MATLAB service retries. Zero or negative means retry forever and pause VIO
+  int matlab_snapshot_max_retries = 0;
+
   /// If we should print concise debug logging for MATLAB snapshot requests and responses
   bool matlab_snapshot_debug_log = false;
 
@@ -134,6 +143,9 @@ struct VioManagerOptions {
       parser->parse_config("matlab_snapshot_enable", matlab_snapshot_enable, false);
       parser->parse_config("matlab_snapshot_service_name", matlab_snapshot_service_name, false);
       parser->parse_config("matlab_snapshot_timeout_sec", matlab_snapshot_timeout_sec, false);
+      parser->parse_config("matlab_snapshot_call_timeout_sec", matlab_snapshot_call_timeout_sec, false);
+      parser->parse_config("matlab_snapshot_retry_delay_sec", matlab_snapshot_retry_delay_sec, false);
+      parser->parse_config("matlab_snapshot_max_retries", matlab_snapshot_max_retries, false);
       parser->parse_config("matlab_snapshot_debug_log", matlab_snapshot_debug_log, false);
     }
     PRINT_DEBUG("  - dt_slam_delay: %.1f\n", dt_slam_delay);
@@ -147,6 +159,9 @@ struct VioManagerOptions {
     PRINT_DEBUG("  - matlab snapshot enable: %d\n", (int)matlab_snapshot_enable);
     PRINT_DEBUG("  - matlab snapshot service: %s\n", matlab_snapshot_service_name.c_str());
     PRINT_DEBUG("  - matlab snapshot timeout sec: %.3f\n", matlab_snapshot_timeout_sec);
+    PRINT_DEBUG("  - matlab snapshot call timeout sec: %.3f\n", matlab_snapshot_call_timeout_sec);
+    PRINT_DEBUG("  - matlab snapshot retry delay sec: %.3f\n", matlab_snapshot_retry_delay_sec);
+    PRINT_DEBUG("  - matlab snapshot max retries: %d\n", matlab_snapshot_max_retries);
     PRINT_DEBUG("  - matlab snapshot debug log: %d\n", (int)matlab_snapshot_debug_log);
   }
 

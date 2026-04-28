@@ -67,6 +67,9 @@ record_timing_filepath: "/tmp/traj_timing.txt" # https://docs.openvins.com/eval-
 matlab_snapshot_enable: false # if true, send the posterior pose snapshot to the MATLAB ROS service after camera update
 matlab_snapshot_service_name: "/matlab/pose_snapshot" # ROS1 service used for posterior pose snapshot requests
 matlab_snapshot_timeout_sec: 0.0 # seconds to wait for service availability before skipping
+matlab_snapshot_call_timeout_sec: 1.0 # seconds to wait for one MATLAB service call before reconnecting
+matlab_snapshot_retry_delay_sec: 0.2 # seconds to wait between MATLAB service reconnect attempts
+matlab_snapshot_max_retries: 0 # 0 means retry forever and pause VIO until MATLAB recovers
 matlab_snapshot_debug_log: false # print concise request/response debug logs for MATLAB snapshot calls
 
 # if we want to save the simulation state and its diagional covariance

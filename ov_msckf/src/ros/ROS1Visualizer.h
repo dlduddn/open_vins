@@ -30,6 +30,7 @@
 #include <message_filters/time_synchronizer.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
+#include <ov_msckf/PoseSnapshotToMatlab.h>
 #include <ros/ros.h>
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/Image.h>
@@ -138,6 +139,9 @@ protected:
   /// Synchronously request an EKF-ready MATLAB constraint for the provided linearization snapshot.
   bool request_matlab_constraint_update(const MatlabConstraintSnapshot &snapshot, MatlabConstraintUpdate &update);
 
+  /// Calls MATLAB service with watchdog reconnect/retry handling.
+  bool call_matlab_snapshot_service_with_retry(ov_msckf::PoseSnapshotToMatlab &snapshot_srv);
+
   /// Global node handler
   std::shared_ptr<ros::NodeHandle> _nh;
 
@@ -166,6 +170,9 @@ protected:
   bool matlab_snapshot_enable = false;
   std::string matlab_snapshot_service_name;
   double matlab_snapshot_timeout_sec = 0.0;
+  double matlab_snapshot_call_timeout_sec = 1.0;
+  double matlab_snapshot_retry_delay_sec = 0.2;
+  int matlab_snapshot_max_retries = 0;
   bool matlab_snapshot_debug_log = false;
 
   // For path viz
