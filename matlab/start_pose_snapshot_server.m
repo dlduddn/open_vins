@@ -19,12 +19,6 @@ function server = start_pose_snapshot_server(masterURI, nodeHost)
     % ROS callback은 MATLAB/ROS 내부 컨텍스트에서 실행되므로 상태는 base
     % workspace에 명시적으로 저장한다.
     assignin("base", "pose_history", struct([]));
-    assignin("base", "pose_request_count", 0);
-    assignin("base", "last_pose_callback_status", struct( ...
-        "index", 0, ...
-        "stage", "server_ready", ...
-        "elapsed_sec", 0, ...
-        "message", ""));
 
     % ROS 서비스 서버를 생성한다. DataFormat을 struct로 맞춰 req/resp 필드를
     % MATLAB 구조체처럼 접근한다.
@@ -36,11 +30,6 @@ function server = start_pose_snapshot_server(masterURI, nodeHost)
     fprintf("[MATLAB] All accepted requests will be appended to 'pose_history'.\n");
 
     function resp = poseSnapshotCallback(~, req, resp)
-        request_index = nextRequestIndex();
-        callback_tic = tic;
-        snapshot = [];
-        updateCallbackStatus(request_index, "begin", callback_tic, "");
-
         try
             % ROS service request 필드를 MATLAB에서 다루기 쉬운 double 배열로 변환한다.
             % Quaternion은 OpenVINS/JPL 관례의 [x y z w] 순서를 그대로 보존한다.
@@ -55,8 +44,7 @@ function server = start_pose_snapshot_server(masterURI, nodeHost)
             % 필수 필드가 비정상이면 C++ 클라이언트에 거절 응답을 보내고 종료한다.
             if ~ok
                 resp = writeConstraintResponse(resp, emptyConstraint(false, errMsg));
-                updateCallbackStatus(request_index, "rejected_snapshot", callback_tic, errMsg);
-                fprintf(2, "[MATLAB] Rejected snapshot index=%d: %s\n", request_index, errMsg);
+                fprintf(2, "[MATLAB] Rejected snapshot: %s\n", errMsg);
                 return;
             end
 
@@ -75,48 +63,26 @@ function server = start_pose_snapshot_server(masterURI, nodeHost)
                 history_count, snapshot.t_cam, snapshot.t_imu);
             fprintf("  pos   : [%.6f %.6f %.6f]\n", snapshot.position);
             fprintf("  quat  : [%.6f %.6f %.6f %.6f]\n", snapshot.quaternion);
-            updateCallbackStatus(request_index, "snapshot_saved", callback_tic, "");
-
-            % =========================== Debugging ============================
-            % 사용자가 snapshot을 확인할 시간을 주기 위해 callback을 여기서 블록한다.
-            % Enter를 누르면 서비스 응답이 반환되고 C++ 쪽 처리가 계속된다.
-            % disp("[MATLAB] Press Enter to release C++...");
-            % input("", "s");
-            % ==================================================================
 
             % =========================== Response =============================
             constraint = computeConstraint(snapshot);
-            updateCallbackStatus(request_index, "constraint_computed", callback_tic, "");
 
             [ok, errMsg] = validateConstraintPayload(constraint);
             if ~ok
-                fprintf(2, "[MATLAB] Rejected constraint response index=%d: %s\n", request_index, errMsg);
+                fprintf(2, "[MATLAB] Rejected constraint response: %s\n", errMsg);
                 constraint = emptyConstraint(false, errMsg);
             end
 
             resp = writeConstraintResponse(resp, constraint);
-            updateCallbackStatus(request_index, "response_written", callback_tic, constraint.status_message);
-            fprintf("[MATLAB] Response written index=%d accepted=%d elapsed=%.3f sec\n", ...
-                request_index, double(logical(constraint.accepted)), toc(callback_tic));
             % ==================================================================
 
         catch ME
-            errMsg = sprintf("MATLAB callback error at index %d: %s", request_index, ME.message);
-            updateCallbackStatus(request_index, "callback_error", callback_tic, errMsg);
+            errMsg = sprintf("MATLAB callback error: %s", ME.message);
             fprintf(2, "[MATLAB] %s\n", errMsg);
             resp = writeConstraintResponse(resp, emptyConstraint(false, errMsg));
         end
     end
 
-end
-
-function request_index = nextRequestIndex()
-    if evalin("base", "exist('pose_request_count', 'var')")
-        request_index = double(evalin("base", "pose_request_count")) + 1;
-    else
-        request_index = 1;
-    end
-    assignin("base", "pose_request_count", request_index);
 end
 
 function history_count = appendSnapshotToHistory(snapshot)
@@ -135,18 +101,6 @@ function history_count = appendSnapshotToHistory(snapshot)
     assignin("base", "last_pose", snapshot);
     assignin("base", "pose_history", pose_history);
     history_count = numel(pose_history);
-end
-
-function updateCallbackStatus(index, stage, callback_tic, message)
-    status = struct();
-    status.index = double(index);
-    status.stage = char(stage);
-    status.elapsed_sec = toc(callback_tic);
-    status.message = char(message);
-    status.updated_at = datetime("now", ...
-        "TimeZone", "local", ...
-        "Format", "yyyy-MM-dd HH:mm:ss.SSS");
-    assignin("base", "last_pose_callback_status", status);
 end
 
 function [ok, errMsg, cov6x6] = validateSnapshot(snapshot)
