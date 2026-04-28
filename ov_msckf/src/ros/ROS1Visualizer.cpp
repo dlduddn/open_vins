@@ -213,9 +213,6 @@ ROS1Visualizer::ROS1Visualizer(std::shared_ptr<ros::NodeHandle> nh, std::shared_
 // -----------------------------------------------------------------------------
 bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnapshot &snapshot, MatlabConstraintUpdate &update) {
 
-  static uint64_t matlab_request_count = 0;
-  const uint64_t request_index = ++matlab_request_count;
-
   // 설정에서 MATLAB constraint 기능이 꺼져 있으면 estimator 쪽에는 "호출하지 못함"으로 알려준다.
   // 이 경우 VioManager는 외부 constraint 없이 기존 OpenVINS update만 수행한다.
   if (!matlab_snapshot_enable)
@@ -271,13 +268,6 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
     }
   }
 
-  if (matlab_snapshot_debug_log) {
-    PRINT_DEBUG("MATLAB constraint request #%llu: t_cam=%.6f t_imu=%.6f p=[%.6f %.6f %.6f] q=[%.6f %.6f %.6f %.6f]\n",
-                (unsigned long long)request_index, snapshot.timestamp_cam, snapshot.timestamp_imu,
-                snapshot.position(0), snapshot.position(1), snapshot.position(2),
-                snapshot.quaternion(0), snapshot.quaternion(1), snapshot.quaternion(2), snapshot.quaternion(3));
-  }
-
   // MATLAB service server가 ROS master에 등록되어 있는지 확인한다.
   // timeout이 양수이면 해당 시간만큼 등록을 기다리고, 0 이하이면 현재 존재 여부만 즉시 확인한다.
   // 주의: 이 timeout은 service 등록 대기 시간이고, 아래 call() 자체의 실행 시간 제한은 아니다.
@@ -299,15 +289,7 @@ bool ROS1Visualizer::request_matlab_constraint_update(const MatlabConstraintSnap
   // 동기식 service 호출이다.
   // MATLAB callback이 H/r/R을 계산해서 response를 반환할 때까지 camera update thread가 여기서 대기한다.
   // 따라서 이 함수가 반환된 직후 VioManager가 같은 선형화 기준점에 EKF update를 걸 수 있다.
-  if (matlab_snapshot_debug_log) {
-    PRINT_DEBUG("MATLAB constraint service call begin #%llu\n", (unsigned long long)request_index);
-  }
   const bool call_success = matlab_snapshot_client.call(snapshot_srv);
-  if (matlab_snapshot_debug_log) {
-    PRINT_DEBUG("MATLAB constraint service result #%llu: success=%d accepted=%d status=\"%s\"\n",
-                (unsigned long long)request_index, (int)call_success, call_success ? (int)snapshot_srv.response.accepted : 0,
-                call_success ? snapshot_srv.response.status_message.c_str() : "");
-  }
 
   // call_success=false는 ROS service transport 자체가 실패한 경우이다.
   // MATLAB이 계산은 했지만 constraint를 쓰지 않겠다고 판단한 경우는 accepted=false로 구분한다.
