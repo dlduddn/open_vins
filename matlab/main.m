@@ -11,7 +11,7 @@ config = loadConfig();
 %% Preprocessing_1: VIO Estimate & Ground Truth
 % Estimated SE(2) in 'OpenVINS local' frame
 estRawData = readtable(config.estDir);
-epoch   = estRawData{:,1}';
+query.Timestamp   = estRawData{:,1}';
 
 est.Pos  = [estRawData{:,2}, estRawData{:,3}]';
 est.Pos0  = [estRawData{1,2}, estRawData{1,3}]';
@@ -30,45 +30,46 @@ estRel.dYaw  = atan2(sin(estRelRawData.dyaw), cos(estRelRawData.dyaw))';
 estRel.dSE2 = [estRelRawData.dtx_body'; estRelRawData.dty_body'; estRel.dYaw]; % 3 x (len-1)
 
 % True SE(3) in 'global/UTM' frame
-gt.rawData = readmatrix(config.gtDir); % [r00 r01 r02 tx r10 r11 r12 ty r20 r21 r22 tz]
-gt.Timestamps  = gt.rawData(:, 1);
-gt.PoseMapGlobal = pose12ToSE3(gt.rawData(:, 2:13));
-
+[gt.Timestamps, gt.Poses] = genRef(config, query.Timestamp);
+gt.PoseMapGlobal = pose12ToSE3(gt.Poses);
 gt.PoseMapLocal = transformToInitLocal(gt.PoseMapGlobal, "Yaw");
 gt.PosMapLocal = reshape(gt.PoseMapLocal(1:2, 4, :), 2, []);
 
 %% Preprocessing_2: Bezier Curve
-% epoch(k)에 대응하는 VIO image Bezier inference를 불러와 measurement로 저장한다.
-bezierQuery = loadBezier(config, epoch); % meas.pointBody = [xCam yCam width id]
+% queryTimestamp에 대응하는 Bezier inference를 불러온다.
+query.Bezier = loadBezier(config, query.Timestamp); % pointsBody = [x_forward y_left width id]
 
-%% Preprocessing_3: Road Centerline Map in 'map local' frame
+%% Preprocessing_3: Road Centerline Map in initial-pose local frame
+% Initial global pose의 XY/yaw를 reference로 사용해 UTM map을 local frame으로 변환한다.
+% buildMap 내부에서 cfg.mapInit*Error를 reference pose에 더해 초기 pose 오차를 모사한다.
 mapDB = buildMap(config, gt.PoseMapGlobal(:, :, 1)); % [xMap_Local yMap_Local 차선수 도로폭]
 
-%% Initialization_1: Map alignment
-% buildMap을 좌표계 변환하는 gt.PoseMapGlobal(:, :, 1)에 오차가 첨가 되지 않으면 x0 = [0 0 0] 이다.
-% 하지만, 실제상황에서는 절대 참 위치는 모르고 대략적인 초기값이 주어진다. 이 상황에서 meas와 map 간의 정렬을 통해 
-% x0을 찾는다
+%% Initialization
+% mapDB는 초기 global pose 추정값을 기준으로 만든 local map이다.
+% 이 초기 pose가 GT와 같다면 첫 frame의 정렬 상태는 x0 = [0; 0; 0]이 된다.
+% 실제 상황에서는 절대 참 pose를 알 수 없으므로, Bezier 중심선 측정과 map 중심선을 정렬해
+% local map 안에서의 초기 SE(2) 상태 x0 = [x; y; yaw]를 추정한다.
+[x0Align, alignInfo] = estimateInitialAlignment(config, mapDB, query.Bezier);
 
-%% Initialization_2: State
+if isfield(config, 'alignVisualize') && config.alignVisualize
+    x0TrueAlign = initialAlignmentTruth(config, ...
+        gt.PoseMapGlobal(:, :, 1), gt.PoseMapGlobal(:, :, alignInfo.frameIdx));
+    visualizeInitialAlignment(mapDB, alignInfo, x0Align, x0TrueAlign);
+end
+
+%% Particle filtering
 % Initial VIO pose error in mapLocal frame: [x; y; yaw].
-% This can be replaced by the result of Initialization_1 map alignment.
-trueInitStateMapLocal = [ ...
-    gt.PosMapLocal(:,1); ...
-    atan2(gt.PoseMapLocal(2,1,1), gt.PoseMapLocal(1,1,1)) ...
-]; % evaluation/debug only
-
 initXStd = 0.001;              % [m]
 initYStd = 0.001;              % [m]
 initYawStd = deg2rad(0.0001);  % [rad]
 P0 = diag([initXStd^2, initYStd^2, initYawStd^2]);
-x0 = [0; 0; 0];                % prior mean; replace with map-alignment result
+x0 = x0Align;                  % prior mean from map-alignment result
 
-%% Particle filtering
-N = 1000; % particle
 sqrtQ = []; % sqrtQ = chol(Q, 'lower');
 R = [];
+N = 1000; % particle
 
-[xhat, N_eff] = sir(x0, P0, estRel.dSE2, bezierQuery, sqrtQ, R, len, N);
+[xhat, N_eff] = sir(x0, P0, estRel.dSE2, query.Bezier, sqrtQ, R, len, N);
 
 %%
 figure;

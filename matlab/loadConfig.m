@@ -16,9 +16,9 @@ function config = loadConfig()
     config.utmZone       = 52;
     config.ds            = 0.5;            % 리샘플링 간격 (m)
     config.showRoadTypes = {'RDD000', 'RDD001', 'RDD002', 'RDD003', 'RDD008', 'RDD009'};
-    config.mapInitXError   = 0.0;          % SD Map 기준 pose x 오차, global/UTM east [m]
-    config.mapInitYError   = 0.0;          % SD Map 기준 pose y 오차, global/UTM north [m]
-    config.mapInitYawError = deg2rad(0.0); % SD Map 기준 pose yaw 오차 [rad]
+    config.mapInitXError   = 3.0 * randn(1);          % SD Map 기준 pose x 오차, global/UTM east [m]
+    config.mapInitYError   = 3.0 * randn(1);          % SD Map 기준 pose y 오차, global/UTM north [m]
+    config.mapInitYawError = deg2rad(10) * randn(1); % SD Map 기준 pose yaw 오차 [rad]
     
     % IPM
     config.yamlDir        = 'D:\Comple Urban\Urban26\stereo_left_bezier_gt';
@@ -29,7 +29,25 @@ function config = loadConfig()
     config.v0             = 120;
     config.curveType      = 'bezier';
     config.sampleSpacing  = 0.5;        % 샘플 간 거리 (m), 선 길이에 따라 샘플 수 자동 결정
-    
+
+    % Initial map alignment
+    config.alignSearchX          = 10.0; % x search half-width [m]
+    config.alignSearchY          = 10.0; % y search half-width [m]
+    config.alignSearchYawDeg     = 30.0; % yaw search half-width [deg]
+    config.alignCoarseStepXY     = 1.0;  % coarse grid xy step [m]
+    config.alignCoarseStepYawDeg = 2.0;  % coarse grid yaw step [deg]
+    config.alignFineRadiusXY     = 1.0;  % fine search half-width around coarse best [m]
+    config.alignFineRadiusYawDeg = 2.0;  % fine search half-width around coarse best [deg]
+    config.alignFineStepXY       = 0.25; % fine grid xy step [m]
+    config.alignFineStepYawDeg   = 0.5;  % fine grid yaw step [deg]
+    config.alignMaxMatchDist     = 3.0;  % robust nearest-neighbor clipping distance [m]
+    config.alignCurveSampleSpacing = 0.5; % Bezier curve sampling interval [m]
+    config.alignMinCurveSamples    = 20;  % minimum samples per curve
+    config.alignMaxCurveSamples    = 100; % maximum samples per curve
+    config.alignCurveTrimFraction  = 0.8; % keep best curve costs for robustness
+    config.alignMapCropMargin    = 20.0; % local map crop margin [m]
+    config.alignVisualize        = true; % plot prior/coarse/final/true alignment
+
     % ICP
     config.windowSize            = 1;      % 현재 프레임 Bezier point만 사용
     config.icpInterval           = 1;      % ICP 수행 간격 (프레임)
