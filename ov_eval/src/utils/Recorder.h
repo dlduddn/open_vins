@@ -155,7 +155,7 @@ protected:
   void write() {
 
     // timestamp
-    outfile.precision(5);
+    outfile.precision(6);
     outfile.setf(std::ios::fixed, std::ios::floatfield);
     outfile << timestamp << " ";
 

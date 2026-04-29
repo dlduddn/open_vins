@@ -990,8 +990,8 @@ void ROS1Visualizer::publish_state() {
 
   // We want to publish in the IMU clock frame
   // The timestamp in the state will be the last camera time
-  double t_ItoC = state->_calib_dt_CAMtoIMU->value()(0);
-  double timestamp_inI = state->_timestamp + t_ItoC;
+  // double t_ItoC = state->_calib_dt_CAMtoIMU->value()(0);
+  double timestamp_inI = state->_timestamp;
 
   // Create pose of IMU (note we use the bag time)
   geometry_msgs::PoseWithCovarianceStamped poseIinM;
