@@ -43,8 +43,10 @@ function yamlName = searchYaml(cfg, t_cam)
         yamlName = '';
     end
 
-    fprintf("  yaml  = %s\n", formatNameForDisplay(yamlName));
-    fprintf('  %d/%d YAML matched\n\n', nMatched, cache.nYaml);
+    if getLogical(cfg, 'yamlLogProgress', true)
+        fprintf("  yaml  = %s\n", formatNameForDisplay(yamlName));
+        fprintf('  %d/%d YAML matched\n\n', nMatched, cache.nYaml);
+    end
 end
 
 function cache = buildYamlCache(yamlDir)
@@ -95,4 +97,11 @@ end
 
 function formattedName = formatNameForDisplay(Name)
     formattedName = regexprep(char(Name), '(\d{3})$', '($1)');
+end
+
+function value = getLogical(s, name, defaultValue)
+    value = defaultValue;
+    if isfield(s, name) && ~isempty(s.(name))
+        value = logical(s.(name));
+    end
 end

@@ -1,8 +1,10 @@
-function [map] = buildMap(cfg, firstPose)
+function [mapNoisy, mapNoError] = buildMap(cfg, firstPose)
 %BUILDSDMAPPOINTCLOUD  SHP 도로중심선을 리샘플링하여 첫 프레임 좌표 2D 점군 생성
 %
 % SD Map (Shapefile 도로중심선)을 균일 리샘플링하고,
-% firstPose 기준 좌표계로 정규화하여 2D 점군을 반환한다.
+% firstPose 기준 좌표계로 정규화하여 2D 점군을 반환한다. 첫 번째 출력은
+% cfg.mapInit*Error를 반영한 알고리즘용 map이고, 두 번째 출력은 error를
+% 반영하지 않은 GT 초기 local frame 시각화용 map이다.
 %
 % 전체 처리 흐름
 %   1) SHP 로드
@@ -24,7 +26,8 @@ function [map] = buildMap(cfg, firstPose)
 %   firstPose - 4x4 SE(3) reference pose in global/UTM frame
 %
 % 출력:
-%   sdPoints - (P,4) 점군 + 속성 [x, y, RDLN, RVWD] (첫 프레임 좌표계)
+%   map        - (P,4) [x, y, RDLN, RVWD], cfg.mapInit*Error 포함
+%   mapNoError - (P,4) [x, y, RDLN, RVWD], cfg.mapInit*Error 미포함
 
 % ---------- 기본 설정값 보완 ----------
 if ~isfield(cfg, 'utmZone'),       cfg.utmZone = 52;          end
@@ -128,35 +131,43 @@ fprintf('  UTM 점군: %d points\n', size(allPts, 1));
 % reference pose의 yaw와 XY 위치만 사용해 local map으로 변환한다.
 T0 = firstPose;
 R0 = T0(1:3, 1:3);
-t0 = T0(1:2, 4);
-t0 = t0 + [cfg.mapInitXError; cfg.mapInitYError];
 
-% 첫 프레임 yaw 추출
-yaw0 = atan2(R0(2,1), R0(1,1));
-yaw0 = yaw0 + cfg.mapInitYawError;
-R0_2d = [cos(yaw0), -sin(yaw0);
-         sin(yaw0),  cos(yaw0)];
+% 첫 프레임 state 추출
+t0True = T0(1:2, 4);
+yaw0True = atan2(R0(2,1), R0(1,1));
+
+% 알고리즘용 map은 의도적으로 초기 pose 오차가 들어간 frame에 둔다.
+t0Noisy = t0True + [cfg.mapInitXError; cfg.mapInitYError];
+yaw0Noisy = yaw0True + cfg.mapInitYawError;
 
 % UTM(E, N) -> 첫 프레임 2D 로컬 좌표계
-sdXY = (R0_2d' * (allPts' - t0))';
+sdXYNoisy = transformXYToLocal(allPts, t0Noisy, yaw0Noisy);
+sdXYNoError = transformXYToLocal(allPts, t0True, yaw0True);
 
 % 점좌표 + 속성 직접 결합
-map = [sdXY, allLaneCounts, allRoadWidths];
+mapNoisy = [sdXYNoisy, allLaneCounts, allRoadWidths];
+mapNoError = [sdXYNoError, allLaneCounts, allRoadWidths];
 
-fprintf('  SD Map 점군 완료: %d points (첫 프레임 좌표계)\n', size(map, 1));
+fprintf('  SD Map 점군 완료: %d points (첫 프레임 좌표계)\n', size(mapNoisy, 1));
 fprintf('  범위 X: [%.1f, %.1f] m,  Y: [%.1f, %.1f] m\n', ...
-    min(map(:,1)), max(map(:,1)), ...
-    min(map(:,2)), max(map(:,2)));
+    min(mapNoisy(:,1)), max(mapNoisy(:,1)), ...
+    min(mapNoisy(:,2)), max(mapNoisy(:,2)));
 
 % 속성 요약 출력
-validLane = ~isnan(map(:,3));
-validWidth = ~isnan(map(:,4));
-fprintf('  RDLN 부여 점 수: %d / %d\n', sum(validLane), size(map,1));
-fprintf('  RVWD 부여 점 수: %d / %d\n', sum(validWidth), size(map,1));
+validLane = ~isnan(mapNoisy(:,3));
+validWidth = ~isnan(mapNoisy(:,4));
+fprintf('  RDLN 부여 점 수: %d / %d\n', sum(validLane), size(mapNoisy,1));
+fprintf('  RVWD 부여 점 수: %d / %d\n', sum(validWidth), size(mapNoisy,1));
 
 end
 
 %% ====================== LOCAL FUNCTIONS ======================
+function localXY = transformXYToLocal(globalXY, t0, yaw0)
+    R0 = [cos(yaw0), -sin(yaw0);
+          sin(yaw0),  cos(yaw0)];
+    localXY = (R0' * (globalXY' - t0))';
+end
+
 function [E, N] = latlon2utm(lat, lon, zone)
     a = 6378137.0;
     f = 1 / 298.257223563;
