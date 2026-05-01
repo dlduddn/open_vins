@@ -71,6 +71,7 @@ function [logL, info] = curveMapLikelihood(cfg, mapDB, queryInput, xStates)
     missPenalty = -abs(getScalar(cfg, 'likelihoodMissLogPenalty', 60.0));
     useRobustLikelihood = getLogical(cfg, 'likelihoodUseRobust', true);
     useBodyGate = getLogical(cfg, 'assocUseBodyRoadGate', true);
+    useCurveCorrespondence = getLogical(cfg, 'assocUseCurveMapCorrespondenceRule', true);
     fovGate = computeCameraFovGate(cfg);
 
     % frame 내 모든 curve가 아니라 전처리 규칙을 통과한 usable curve만 사용한다.
@@ -108,7 +109,8 @@ function [logL, info] = curveMapLikelihood(cfg, mapDB, queryInput, xStates)
         [stateLogL, matchedCount, meanResidual] = evaluateStatesInFov( ...
             curves, mapIndex, xStates(:, evalIdx), sigma, maxD2, maxDist, ...
             minMatchFraction, maxEffSamples, fovGate, robustScale, ...
-            curveMissPenalty, maxCurvePenalty, inlierReward, useRobustLikelihood);
+            curveMissPenalty, maxCurvePenalty, inlierReward, useRobustLikelihood, ...
+            useCurveCorrespondence);
     else
         % 기본 mode:
         % query sample을 pose별 map 좌표로 변환한 뒤 전체 map index에서 최근접점을
@@ -116,7 +118,8 @@ function [logL, info] = curveMapLikelihood(cfg, mapDB, queryInput, xStates)
         [stateLogL, matchedCount, meanResidual] = evaluateStates( ...
             curves, mapIndex, xStates(:, evalIdx), sigma, maxD2, maxDist, ...
             minMatchFraction, maxEffSamples, fovGate, robustScale, ...
-            curveMissPenalty, maxCurvePenalty, inlierReward, useRobustLikelihood);
+            curveMissPenalty, maxCurvePenalty, inlierReward, useRobustLikelihood, ...
+            useCurveCorrespondence);
     end
 
     % 디버깅/로그용 결과를 원래 pose index 위치에 되돌려 기록한다.
@@ -125,7 +128,11 @@ function [logL, info] = curveMapLikelihood(cfg, mapDB, queryInput, xStates)
 
     % 최소 matched curve 수를 만족한 pose만 association 성공으로 인정한다.
     % 실패한 pose는 missPenalty, 성공한 pose는 거리 기반 stateLogL을 사용한다.
-    associated = matchedCount >= minMatchedCurves;
+    if useCurveCorrespondence
+        associated = matchedCount >= minMatchedCurves;
+    else
+        associated = true(size(matchedCount));
+    end
     if useRobustLikelihood
         frameMissPenalty = min(missPenalty, curveMissPenalty * numel(curves));
     else
@@ -147,7 +154,8 @@ end
 
 function [stateLogL, matchedCount, meanResidual] = evaluateStatesInFov( ...
         curves, mapIndex, xStates, sigma, maxD2, maxDist, minMatchFraction, ...
-        maxEffSamples, fovGate, robustScale, curveMissPenalty, maxCurvePenalty, inlierReward, useRobustLikelihood)
+        maxEffSamples, fovGate, robustScale, curveMissPenalty, maxCurvePenalty, ...
+        inlierReward, useRobustLikelihood, useCurveCorrespondence)
 
     nState = size(xStates, 2);
     nCurve = numel(curves);
@@ -215,7 +223,7 @@ function [stateLogL, matchedCount, meanResidual] = evaluateStatesInFov( ...
 
             % 한 curve의 sample 중 충분한 비율이 maxDist 안에 들어와야 matched로 본다.
             matchFraction = mean(dist <= sqrt(maxD2));
-            if matchFraction < minMatchFraction
+            if useCurveCorrespondence && matchFraction < minMatchFraction
                 continue;
             end
 
@@ -230,7 +238,9 @@ function [stateLogL, matchedCount, meanResidual] = evaluateStatesInFov( ...
             else
                 stateLogL(j) = stateLogL(j) + curveLogL;
             end
-            matchedCount(j) = matchedCount(j) + 1;
+            if matchFraction >= minMatchFraction || ~useCurveCorrespondence
+                matchedCount(j) = matchedCount(j) + 1;
+            end
 
             % meanResidual은 score 계산용이 아니라 로그/디버깅용 진단값이다.
             residualSum(j) = residualSum(j) + sum(dist);
@@ -245,7 +255,8 @@ end
 
 function [stateLogL, matchedCount, meanResidual] = evaluateStates( ...
         curves, mapIndex, xStates, sigma, maxD2, maxDist, minMatchFraction, ...
-        maxEffSamples, fovGate, robustScale, curveMissPenalty, maxCurvePenalty, inlierReward, useRobustLikelihood)
+        maxEffSamples, fovGate, robustScale, curveMissPenalty, maxCurvePenalty, ...
+        inlierReward, useRobustLikelihood, useCurveCorrespondence)
 
     nState = size(xStates, 2);
     nCurve = numel(curves);
@@ -288,12 +299,13 @@ function [stateLogL, matchedCount, meanResidual] = evaluateStates( ...
         % 각 pose에서 이 curve의 sample 중 maxDist 이내에 들어온 비율을 계산한다.
         matchFraction = mean(dist <= maxDist, 1);
         matched = matchFraction >= minMatchFraction;
+        scored = matched | ~useCurveCorrespondence;
 
-        if ~any(matched)
+        if ~any(scored)
             continue;
         end
 
-        % matched pose에 대해서만 likelihood를 누적한다. residual은 maxD2로 clipping하고,
+        % scored pose에 대해서만 likelihood를 누적한다. residual은 maxD2로 clipping하고,
         % sample 수 효과는 maxEffSamples로 제한한다.
         d2Clipped = min(d2, maxD2);
         nEff = min(size(d2Clipped, 1), maxEffSamples);
@@ -301,16 +313,16 @@ function [stateLogL, matchedCount, meanResidual] = evaluateStates( ...
             sigma, robustScale, nEff, maxCurvePenalty, inlierReward, useRobustLikelihood);
 
         if useRobustLikelihood
-            stateLogL(matched) = stateLogL(matched) - curveMissPenalty + curveLogL(matched);
+            stateLogL(scored) = stateLogL(scored) - curveMissPenalty + curveLogL(scored);
         else
-            stateLogL(matched) = stateLogL(matched) + curveLogL(matched);
+            stateLogL(scored) = stateLogL(scored) + curveLogL(scored);
         end
         matchedCount(matched) = matchedCount(matched) + 1;
 
-        % 평균 residual은 matched pose에 대해서만 누적한다. FOV 밖 point 때문에
+        % 평균 residual은 scored pose에 대해서만 누적한다. FOV 밖 point 때문에
         % dist에 inf가 있으면 meanResidual도 inf가 될 수 있다.
-        residualSum(matched) = residualSum(matched) + sum(dist(:, matched), 1);
-        residualCount(matched) = residualCount(matched) + size(dist, 1);
+        residualSum(scored) = residualSum(scored) + sum(dist(:, scored), 1);
+        residualCount(scored) = residualCount(scored) + size(dist, 1);
     end
 
     meanResidual = inf(1, nState);
@@ -505,35 +517,4 @@ function info = emptyInfo(nState)
         'bodyLateralDistance', inf(1, nState), ...
         'bodyLateralLimit', NaN(1, nState), ...
         'frame', []);
-end
-
-function value = getScalar(s, name, defaultValue)
-    % cfg.name이 존재하고 비어 있지 않으면 그 값을, 아니면 defaultValue를 사용한다.
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function value = maxFinite(values, defaultValue)
-    % 양수 finite 값 중 최댓값을 고르고, 없으면 defaultValue를 반환한다.
-    values = values(isfinite(values) & values > 0);
-    if isempty(values)
-        value = defaultValue;
-    else
-        value = max(values);
-    end
-end
-
-function value = getLogical(s, name, defaultValue)
-    % cfg.name을 logical 옵션으로 읽는다.
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
-end
-
-function angle = wrapAngle(angle)
-    % 각도를 [-pi, pi] 범위로 정규화한다.
-    angle = atan2(sin(angle), cos(angle));
 end

@@ -98,10 +98,3 @@ end
 function formattedName = formatNameForDisplay(Name)
     formattedName = regexprep(char(Name), '(\d{3})$', '($1)');
 end
-
-function value = getLogical(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
-end

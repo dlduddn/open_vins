@@ -99,6 +99,8 @@ function curve = makeBezierCurve(cfg, id, segmentIdx, controlXY, widths)
     end
 
     segLen = sqrt(sum(diff(sampleXY, 1, 1).^2, 2));
+    % Body-distance rule uses only the curve end control point, not all samples.
+    endBodyDistance = norm(controlXY(end, :));
     curve = struct( ...
         'id', id, ...
         'segmentIdx', segmentIdx, ...
@@ -108,7 +110,7 @@ function curve = makeBezierCurve(cfg, id, segmentIdx, controlXY, widths)
         'width', width, ...
         'length', sum(segLen), ...
         'chordLength', norm(controlXY(end, :) - controlXY(1, :)), ...
-        'minBodyDistance', min(sqrt(sum(sampleXY.^2, 2))), ...
+        'minBodyDistance', endBodyDistance, ...
         'startXY', controlXY(1, :), ...
         'endXY', controlXY(end, :), ...
         'startConnected', false, ...
@@ -139,9 +141,14 @@ function curves = annotateStartConnections(cfg, curves)
 end
 
 function curves = applyQueryOnlyRules(cfg, curves, isYawing, isPitching)
+    useYawingRule = getLogical(cfg, 'assocUseYawingRejection', true);
+    usePitchingRule = getLogical(cfg, 'assocUsePitchingRejection', true);
+    useChordRule = getLogical(cfg, 'assocUseMinCurveChordRule', true);
+    useBodyDistanceRule = getLogical(cfg, 'assocUseMinBodyDistanceRule', true);
+    useStartConnectionRule = getLogical(cfg, 'assocUseStartConnectionRule', true);
     minChord = getScalar(cfg, 'assocMinCurveChord', 4.0);
     minBodyDist = getScalar(cfg, 'assocMinBodyDistance', 2.0);
-    requireConnection = getLogical(cfg, 'assocRequireStartConnection', true);
+    requireConnection = useStartConnectionRule && getLogical(cfg, 'assocRequireStartConnection', true);
     allowSingleCurve = getLogical(cfg, 'assocAllowSingleCurveWithoutConnection', true);
     if allowSingleCurve && numel(curves) == 1
         requireConnection = false;
@@ -150,16 +157,16 @@ function curves = applyQueryOnlyRules(cfg, curves, isYawing, isPitching)
     for i = 1:numel(curves)
         reasons = strings(0, 1);
 
-        if isYawing
+        if useYawingRule && isYawing
             reasons(end + 1) = "yawing"; %#ok<AGROW>
         end
-        if isPitching
+        if usePitchingRule && isPitching
             reasons(end + 1) = "pitching"; %#ok<AGROW>
         end
-        if curves(i).chordLength < minChord
+        if useChordRule && curves(i).chordLength < minChord
             reasons(end + 1) = "shortChord"; %#ok<AGROW>
         end
-        if curves(i).minBodyDistance < minBodyDist
+        if useBodyDistanceRule && curves(i).minBodyDistance < minBodyDist
             reasons(end + 1) = "nearBody"; %#ok<AGROW>
         end
         if requireConnection && ~curves(i).startConnected
@@ -231,18 +238,4 @@ function curve = emptyCurve()
         'startConnected', {}, ...
         'isUsable', {}, ...
         'rejectReason', {});
-end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function value = getLogical(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
 end

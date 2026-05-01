@@ -49,7 +49,11 @@ function [x0, info] = estimateInitialTrajectoryAlignment(cfg, mapDB, meas, dSE2,
     fineX = makeRange(coarseBest.x(1), fineRadiusXY, getScalar(cfg, 'initFineStepXY', 0.25));
     fineY = makeRange(coarseBest.x(2), fineRadiusXY, getScalar(cfg, 'initFineStepXY', 0.25));
     fineYaw = makeRange(coarseBest.x(3), fineRadiusYaw, deg2rad(getScalar(cfg, 'initFineStepYawDeg', 0.5)));
-    best = searchInitialGrid(cfg, mapIndex, frames, frameIdx, relPose, fineX, fineY, fineYaw, prior);
+    if getLogical(cfg, 'initUseFineSearch', true)
+        best = searchInitialGrid(cfg, mapIndex, frames, frameIdx, relPose, fineX, fineY, fineYaw, prior);
+    else
+        best = coarseBest;
+    end
 
     if ~isfinite(best.logL)
         warning('estimateInitialTrajectoryAlignment:NoFiniteLikelihood', ...
@@ -175,6 +179,11 @@ function best = searchInitialGrid(cfg, mapIndex, frames, frameIdx, relPose, xVal
 end
 
 function score = priorLogScore(cfg, states, prior)
+    if ~getLogical(cfg, 'initUsePriorScore', true)
+        score = zeros(1, size(states, 2));
+        return;
+    end
+
     stdX = max(getScalar(cfg, 'initPriorStdX', inf), eps);
     stdY = max(getScalar(cfg, 'initPriorStdY', inf), eps);
     stdYaw = max(deg2rad(getScalar(cfg, 'initPriorStdYawDeg', inf)), eps);
@@ -280,15 +289,4 @@ function values = makeRange(center, radius, step)
     if isempty(values)
         values = center;
     end
-end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function angle = wrapAngle(angle)
-    angle = atan2(sin(angle), cos(angle));
 end

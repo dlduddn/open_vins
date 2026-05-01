@@ -45,26 +45,3 @@ function mapIndex = emptyMapIndex()
         'hasKdTree', false, ...
         'searcher', []);
 end
-
-function value = maxFinite(values, defaultValue)
-    values = values(isfinite(values) & values > 0);
-    if isempty(values)
-        value = defaultValue;
-    else
-        value = max(values);
-    end
-end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function value = getLogical(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
-end

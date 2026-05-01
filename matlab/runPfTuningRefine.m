@@ -5,7 +5,7 @@ function results = runPfTuningRefine(nParticles)
         nParticles = [];
     end
 
-    addpath estimator\ map\ math\ rosservice\
+    addpath estimator\ map\ math\ rosservice\ utils\
 
     baseCfg = loadConfig();
     baseCfg.yamlLogProgress = false;
@@ -139,16 +139,6 @@ end
 
 function v = variant(name, note, params)
     v = struct('name', string(name), 'note', string(note), 'params', params);
-end
-
-function out = mergeStructs(varargin)
-    out = struct();
-    for i = 1:nargin
-        names = fieldnames(varargin{i});
-        for j = 1:numel(names)
-            out.(names{j}) = varargin{i}.(names{j});
-        end
-    end
 end
 
 function cfg = applyVariant(cfg, variant)

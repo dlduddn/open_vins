@@ -5,14 +5,14 @@ function [x0, info] = estimateInitialAlignment(cfg, mapDB, meas)
 % highest curve-map likelihood. It shares the exact same likelihood model
 % used later by the particle filter.
 
-    prior = [
-        getScalar(cfg, 'initPriorX', 0.0);
-        getScalar(cfg, 'initPriorY', 0.0);
-        deg2rad(getScalar(cfg, 'initPriorYawDeg', 0.0))
-    ];
+    prior = [getScalar(cfg, 'initPriorX', 0.0);
+             getScalar(cfg, 'initPriorY', 0.0);
+             deg2rad(getScalar(cfg, 'initPriorYawDeg', 0.0))
+            ];
     x0 = prior;
     info = struct('frameIdx', [], 'x0', x0, 'prior', prior);
-
+    
+    % =========================== Integrity Check =========================== 
     [frameIdx, frame] = firstUsableBezierFrame(cfg, meas);
     if isempty(frameIdx)
         warning('estimateInitialPoseByCurveLikelihood:NoUsableQuery', ...
@@ -27,29 +27,40 @@ function [x0, info] = estimateInitialAlignment(cfg, mapDB, meas)
             'Usable query frame has no sampled curve points. Returning prior.');
         return;
     end
-
+    % ======================================================================= 
+    
+    % ============================= Parameters ==============================
     searchX = getScalar(cfg, 'initSearchX', 10.0);
     searchY = getScalar(cfg, 'initSearchY', 10.0);
     searchYaw = deg2rad(getScalar(cfg, 'initSearchYawDeg', 30.0));
+
+    fineRadiusXY = getScalar(cfg, 'initFineRadiusXY', 1.0);
+    fineRadiusYaw = deg2rad(getScalar(cfg, 'initFineRadiusYawDeg', 2.0));
+    
     cropMargin = getScalar(cfg, 'initMapCropMargin', 20.0);
     mapCrop = cropMapForSearch(mapDB, sourceXY, prior, searchX, searchY, cropMargin);
-    if isempty(mapCrop)
-        mapCrop = mapDB;
-    end
+    if isempty(mapCrop), mapCrop = mapDB; end
     mapIndex = prepareCurveMapIndex(cfg, mapCrop);
+    % ======================================================================= 
 
+    % ============================= Alignment ==============================
+    % Coarse
     coarseX = makeRange(prior(1), searchX, getScalar(cfg, 'initCoarseStepXY', 1.0));
     coarseY = makeRange(prior(2), searchY, getScalar(cfg, 'initCoarseStepXY', 1.0));
     coarseYaw = makeRange(prior(3), searchYaw, deg2rad(getScalar(cfg, 'initCoarseStepYawDeg', 2.0)));
     coarseBest = searchGrid(cfg, mapIndex, frame, coarseX, coarseY, coarseYaw);
-
-    fineRadiusXY = getScalar(cfg, 'initFineRadiusXY', 1.0);
-    fineRadiusYaw = deg2rad(getScalar(cfg, 'initFineRadiusYawDeg', 2.0));
+    
+    % Fine
     fineX = makeRange(coarseBest.x(1), fineRadiusXY, getScalar(cfg, 'initFineStepXY', 0.25));
     fineY = makeRange(coarseBest.x(2), fineRadiusXY, getScalar(cfg, 'initFineStepXY', 0.25));
     fineYaw = makeRange(coarseBest.x(3), fineRadiusYaw, deg2rad(getScalar(cfg, 'initFineStepYawDeg', 0.5)));
-    best = searchGrid(cfg, mapIndex, frame, fineX, fineY, fineYaw);
+    if getLogical(cfg, 'initUseFineSearch', true)
+        best = searchGrid(cfg, mapIndex, frame, fineX, fineY, fineYaw);
+    else
+        best = coarseBest;
+    end
 
+        % Results
     if ~isfinite(best.logL)
         warning('estimateInitialPoseByCurveLikelihood:NoFiniteLikelihood', ...
             'All initialization candidates failed map association. Returning prior.');
@@ -59,7 +70,9 @@ function [x0, info] = estimateInitialAlignment(cfg, mapDB, meas)
     end
 
     [~, bestEval] = curveMapLikelihood(cfg, mapIndex, frame, x0);
+    % ======================================================================== 
 
+    % ================================ Info ================================ 
     info.frameIdx = frameIdx;
     info.x0 = x0;
     info.prior = prior;
@@ -88,6 +101,7 @@ function [x0, info] = estimateInitialAlignment(cfg, mapDB, meas)
              'logL=%.2f, matchedCurves=%d/%d, samples=%d\n'], ...
         frameIdx, x0(1), x0(2), rad2deg(x0(3)), best.logL, ...
         bestEval.matchedCurveCount(1), numel(frame.usableIdx), size(sourceXY, 1));
+    % ======================================================================== 
 end
 
 function [frameIdx, frame] = firstUsableBezierFrame(cfg, meas)
@@ -172,15 +186,4 @@ function values = makeRange(center, radius, step)
     if isempty(values)
         values = center;
     end
-end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function angle = wrapAngle(angle)
-    angle = atan2(sin(angle), cos(angle));
 end

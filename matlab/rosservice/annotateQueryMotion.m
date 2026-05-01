@@ -50,14 +50,3 @@ function meas = annotateQueryMotion(cfg, meas, rpy, timestamps)
         meas(k).isPitching = pitchRate(k) > pitchThresh;
     end
 end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function angle = wrapAngle(angle)
-    angle = atan2(sin(angle), cos(angle));
-end

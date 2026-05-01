@@ -343,17 +343,3 @@ function value = minFinite(values, defaultValue)
         value = min(values);
     end
 end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isstruct(s) && isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function value = getLogical(s, name, defaultValue)
-    value = defaultValue;
-    if isstruct(s) && isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
-end

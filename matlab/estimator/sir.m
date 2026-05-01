@@ -1,4 +1,4 @@
-function [xhat, N_eff] = sir(cfg, mapDB, x0, P0, dSE2, meas, sqrtQ, len, N)
+function [xhat, N_eff, pfDiag] = sir(cfg, mapDB, x0, P0, dSE2, meas, sqrtQ, len, N)
 %SIRBEZIERLIKELIHOOD Sequential importance resampling with Bezier likelihood.
 %
 % The measurement model is curveMapLikelihood(), shared with initialization.
@@ -7,6 +7,7 @@ function [xhat, N_eff] = sir(cfg, mapDB, x0, P0, dSE2, meas, sqrtQ, len, N)
     stateDim = 3;
     xhat = zeros(stateDim, len);
     N_eff = zeros(1, len);
+    pfDiag = initPfDiagnostics(len);
     mapIndex = prepareCurveMapIndex(cfg, mapDB);
     if isfield(cfg, 'pfRandomSeed') && ~isempty(cfg.pfRandomSeed)
         rng(cfg.pfRandomSeed);
@@ -29,6 +30,7 @@ function [xhat, N_eff] = sir(cfg, mapDB, x0, P0, dSE2, meas, sqrtQ, len, N)
     [xhat(:, 1), N_eff(1)] = weightedEstimate(xi, wi);
     visualizePfMapMatching(cfg, mapIndex, 1, len, xi, wi, xhat(:, 1), ...
         N_eff(1), used, false, usableCount, meanLogL, matchViz);
+    pfDiag = recordPfDiagnostics(pfDiag, 1, used, false, usableCount, meanLogL, N_eff(1), N, matchViz);
     logFrameProgress(cfg.pfLogProgress, 1, len, cfg.pfLogInterval, used, false, usableCount, meanLogL, N_eff(1), N, xhat(:, 1));
 
     for t = 2:len
@@ -70,8 +72,66 @@ function [xhat, N_eff] = sir(cfg, mapDB, x0, P0, dSE2, meas, sqrtQ, len, N)
                 N_eff(t), used, false, usableCount, meanLogL, matchViz);
         end
 
+        pfDiag = recordPfDiagnostics(pfDiag, t, used, resampled, usableCount, meanLogL, N_eff(t), N, matchViz);
         logFrameProgress(cfg.pfLogProgress, t, len, cfg.pfLogInterval, used, resampled, ...
             usableCount, meanLogL, N_eff(t), N, xhat(:, t));
+    end
+end
+
+function pfDiag = initPfDiagnostics(len)
+    pfDiag = struct( ...
+        'usedUpdate', false(1, len), ...
+        'resampled', false(1, len), ...
+        'usableCurves', zeros(1, len), ...
+        'meanLogL', NaN(1, len), ...
+        'nEff', NaN(1, len), ...
+        'nEffRatio', NaN(1, len), ...
+        'associatedParticleRatio', NaN(1, len), ...
+        'roadGatePassRatio', NaN(1, len), ...
+        'matchedCurveCountMean', NaN(1, len), ...
+        'meanResidual', NaN(1, len), ...
+        'rejectYawing', zeros(1, len), ...
+        'rejectPitching', zeros(1, len), ...
+        'rejectShortChord', zeros(1, len), ...
+        'rejectNearBody', zeros(1, len), ...
+        'rejectIsolatedStart', zeros(1, len));
+end
+
+function pfDiag = recordPfDiagnostics(pfDiag, t, used, resampled, usableCount, meanLogL, neff, nParticle, matchViz)
+    pfDiag.usedUpdate(t) = logical(used);
+    pfDiag.resampled(t) = logical(resampled);
+    pfDiag.usableCurves(t) = usableCount;
+    pfDiag.meanLogL(t) = meanLogL;
+    pfDiag.nEff(t) = neff;
+    pfDiag.nEffRatio(t) = neff / max(nParticle, 1);
+
+    if isstruct(matchViz)
+        if isfield(matchViz, 'associatedRatio')
+            pfDiag.associatedParticleRatio(t) = matchViz.associatedRatio;
+        end
+        if isfield(matchViz, 'frame') && isstruct(matchViz.frame) && isfield(matchViz.frame, 'rejectSummary')
+            rejectSummary = matchViz.frame.rejectSummary;
+            pfDiag.rejectYawing(t) = getRejectCount(rejectSummary, 'yawing');
+            pfDiag.rejectPitching(t) = getRejectCount(rejectSummary, 'pitching');
+            pfDiag.rejectShortChord(t) = getRejectCount(rejectSummary, 'shortChord');
+            pfDiag.rejectNearBody(t) = getRejectCount(rejectSummary, 'nearBody');
+            pfDiag.rejectIsolatedStart(t) = getRejectCount(rejectSummary, 'isolatedStart');
+        end
+        if isfield(matchViz, 'likelihoodInfo') && isstruct(matchViz.likelihoodInfo)
+            info = matchViz.likelihoodInfo;
+            if isfield(info, 'roadGateOk') && ~isempty(info.roadGateOk)
+                pfDiag.roadGatePassRatio(t) = mean(logical(info.roadGateOk));
+            end
+            if isfield(info, 'matchedCurveCount') && ~isempty(info.matchedCurveCount)
+                pfDiag.matchedCurveCountMean(t) = mean(info.matchedCurveCount, 'omitnan');
+            end
+            if isfield(info, 'meanResidual') && ~isempty(info.meanResidual)
+                residual = info.meanResidual(isfinite(info.meanResidual));
+                if ~isempty(residual)
+                    pfDiag.meanResidual(t) = mean(residual, 'omitnan');
+                end
+            end
+        end
     end
 end
 
@@ -269,29 +329,4 @@ end
 
 function doLog = shouldLogFrame(t, len, logInterval)
     doLog = t == 1 || t == len || mod(t, logInterval) == 0;
-end
-
-function angle = wrapAngle(angle)
-    angle = atan2(sin(angle), cos(angle));
-end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isstruct(s) && isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function value = getLogical(s, name, defaultValue)
-    value = defaultValue;
-    if isstruct(s) && isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
-end
-
-function value = getField(s, name, defaultValue)
-    value = defaultValue;
-    if isstruct(s) && isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
 end

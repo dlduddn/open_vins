@@ -3,7 +3,7 @@ clear all
 close all
 clc
 
-addpath estimator\ map\ math\ rosservice\
+addpath estimator\ map\ math\ rosservice\ utils\
 
 %% Configuration
 config = loadConfig();
@@ -60,7 +60,7 @@ else
     [x0Align, alignInfo] = estimateInitialAlignment(config, mapDB, query.Bezier);
     x0TrueAlign = initialAlignmentTruth(config, gt.PoseMapGlobal(:, :, 1), gt.PoseMapGlobal(:, :, alignInfo.frameIdx));
 end
-visualizeInitialAlignment(mapDB, alignInfo, x0Align, x0TrueAlign);
+% visualizeInitialAlignment(mapDB, alignInfo, x0Align, x0TrueAlign);
 
 %% Particle filtering
 % Particle
@@ -80,6 +80,7 @@ sqrtQ = [];
 xTrue0InMap = initialAlignmentTruth(config, gt.PoseMapGlobal(:, :, 1), gt.PoseMapGlobal(:, :, 1));
 xhatGtViz = recenterStatesByPose(xhat, xTrue0InMap);
 toc(a)
+
 %% Visualization
 figure;
 scatter(mapDBGtViz(:,1), mapDBGtViz(:,2), 1, 'k', 'filled' );
@@ -125,23 +126,3 @@ subplot(2,1,2)
 plot(N_eff, 'k-', 'LineWidth', 1.0);
 grid on;
 title("PF effective sample size", 'FontSize', 14)
-
-
-function x0 = selectPfInitialState(cfg, x0Align)
-    if getLogical(cfg, 'initUseAlignmentForPf', true) && numel(x0Align) == 3 && all(isfinite(x0Align(:)))
-        x0 = x0Align(:);
-        if ~getLogical(cfg, 'initUseLongitudinalCorrection', false)
-            x0(1) = 0.0;
-        end
-    else
-        x0 = [0; 0; 0];
-    end
-    x0(3) = atan2(sin(x0(3)), cos(x0(3)));
-end
-
-function value = getLogical(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
-end

@@ -5,7 +5,7 @@ function results = runPfTuning(nParticles)
         nParticles = [];
     end
 
-    addpath estimator\ map\ math\ rosservice\
+    addpath estimator\ map\ math\ rosservice\ utils\
 
     baseCfg = loadConfig();
     baseCfg.yamlLogProgress = false;

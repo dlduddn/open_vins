@@ -133,14 +133,3 @@ function outXY = transformPoints(sourceXY, x)
     s = sin(x(3));
     outXY = sourceXY * [c, s; -s, c] + x(1:2).';
 end
-
-function value = getField(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function angle = wrapAngle(angle)
-    angle = atan2(sin(angle), cos(angle));
-end

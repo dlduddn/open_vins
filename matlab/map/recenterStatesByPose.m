@@ -28,7 +28,3 @@ function statesOut = recenterStatesByPose(statesIn, xPose)
     statesOut(1:2, valid) = R' * (statesIn(1:2, valid) - xPose(1:2));
     statesOut(3, valid) = wrapAngle(statesIn(3, valid) - xPose(3));
 end
-
-function angle = wrapAngle(angle)
-    angle = atan2(sin(angle), cos(angle));
-end

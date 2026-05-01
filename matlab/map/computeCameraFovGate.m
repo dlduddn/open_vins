@@ -48,24 +48,3 @@ function gate = computeCameraFovGate(cfg)
     gate.enabled = isfinite(gate.leftAngle) && isfinite(gate.rightAngle) && ...
         gate.leftAngle > 0 && gate.rightAngle > 0 && gate.maxRange > gate.minRange;
 end
-
-function value = getScalar(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function value = getField(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = s.(name);
-    end
-end
-
-function value = getLogical(s, name, defaultValue)
-    value = defaultValue;
-    if isfield(s, name) && ~isempty(s.(name))
-        value = logical(s.(name));
-    end
-end
