@@ -60,7 +60,7 @@ else
     [x0Align, alignInfo] = estimateInitialAlignment(config, mapDB, query.Bezier);
     x0TrueAlign = initialAlignmentTruth(config, gt.PoseMapGlobal(:, :, 1), gt.PoseMapGlobal(:, :, alignInfo.frameIdx));
 end
-% visualizeInitialAlignment(mapDB, alignInfo, x0Align, x0TrueAlign);
+visualizeInitialAlignment(mapDB, alignInfo, x0Align, x0TrueAlign);
 
 %% Particle filtering
 % Particle
@@ -74,7 +74,8 @@ x0 = selectPfInitialState(config, x0Align);
 % Process noise is configured adaptively in sir() from cfg.pfProcess*.
 sqrtQ = [];
 
-[xhat, N_eff] = sir(config, mapDB, x0, P0, estRel.dSE2, query.Bezier, sqrtQ, len, N);
+[xhat, N_eff] = sirLikelihood(config, mapDB, x0, P0, estRel.dSE2, query, sqrtQ, len, N);
+% [xhat, N_eff] = sir(config, mapDB, x0, P0, estRel.dSE2, query, sqrtQ, len, N);
 
 % xhat 시각화 변환용: map frame (Noisy)에서 map frame (True)으로 가는 변환
 xTrue0InMap = initialAlignmentTruth(config, gt.PoseMapGlobal(:, :, 1), gt.PoseMapGlobal(:, :, 1));

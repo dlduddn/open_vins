@@ -3,19 +3,17 @@ function [xhat, N_eff, pfDiag] = sir(cfg, mapDB, x0, P0, dSE2, meas, sqrtQ, len,
 %
 % The measurement model is curveMapLikelihood(), shared with initialization.
 
+    rng(cfg.pfRandomSeed);
+
     % Pre-allocation
     stateDim = 3;
     xhat = zeros(stateDim, len);
     N_eff = zeros(1, len);
     pfDiag = initPfDiagnostics(len);
     mapIndex = prepareCurveMapIndex(cfg, mapDB);
-    if isfield(cfg, 'pfRandomSeed') && ~isempty(cfg.pfRandomSeed)
-        rng(cfg.pfRandomSeed);
-    end
 
-    % Initial particle
-    sqrtP0 = sqrtPsd(P0, stateDim);
-    xi = repmat(x0(:), 1, N) + sqrtP0 * randn(stateDim, N);
+    % Initialization
+    xi = repmat(x0(:), 1, N) + sqrt(P0) * randn(stateDim, N);
     xi(3, :) = wrapAngle(xi(3, :));
     wi = (1 / N) * ones(1, N);
 
@@ -28,8 +26,9 @@ function [xhat, N_eff, pfDiag] = sir(cfg, mapDB, x0, P0, dSE2, meas, sqrtQ, len,
     end
 
     [xhat(:, 1), N_eff(1)] = weightedEstimate(xi, wi);
-    visualizePfMapMatching(cfg, mapIndex, 1, len, xi, wi, xhat(:, 1), ...
-        N_eff(1), used, false, usableCount, meanLogL, matchViz);
+
+    % Log
+    visualizePfMapMatching(cfg, mapIndex, 1, len, xi, wi, xhat(:, 1), N_eff(1), used, false, usableCount, meanLogL, matchViz);
     pfDiag = recordPfDiagnostics(pfDiag, 1, used, false, usableCount, meanLogL, N_eff(1), N, matchViz);
     logFrameProgress(cfg.pfLogProgress, 1, len, cfg.pfLogInterval, used, false, usableCount, meanLogL, N_eff(1), N, xhat(:, 1));
 
@@ -136,59 +135,92 @@ function pfDiag = recordPfDiagnostics(pfDiag, t, used, resampled, usableCount, m
 end
 
 function [wi, used, usableCount, meanLogL, matchViz] = updateWeights(cfg, mapDB, meas, t, xi, wi)
+    % 기본 출력값 초기화
+    % used가 true가 되는 경우에만 이번 측정값이 weight update에 실제 사용된 것임
     used = false;
     usableCount = 0;
     meanLogL = NaN;
     matchViz = emptyMatchViz();
 
-    if t > numel(meas)
+    % 현재 시간 index t에 해당하는 측정값이 없으면 갱신하지 않음
+    curTime = meas.Timestamp(t);
+    measTime = meas.Bezier(t).t_cam;
+    notSame = logical(curTime-measTime);
+    if notSame
         return;
     end
 
-    frame = buildQueryBezierFrame(cfg, meas(t));
+    % 현재 측정값을 map matching에 사용할 Bezier curve frame으로 변환
+    frame = buildQueryBezierFrame(cfg, meas.Bezier(t));
+    usableCount = numel(frame.usableIdx); % 실제 likelihood 계산에 사용할 수 있는 curve 개수
     matchViz.frame = frame;
-    usableCount = numel(frame.usableIdx);
-    if ~frame.hasUsableCurves
-        return;
+    if ~frame.hasUsableCurves % 사용할 수 있는 curve가 없으면 weight update 생략
+        return; 
     end
 
+    % 각 particle xi에 대해 현재 frame이 mapDB와 얼마나 잘 맞는지 log-likelihood 계산
     [logL, likelihoodInfo] = curveMapLikelihood(cfg, mapDB, frame, xi);
     matchViz.logL = logL;
     matchViz.likelihoodInfo = likelihoodInfo;
-    if all(~isfinite(logL))
+    if all(~isfinite(logL)) % 모든 particle의 likelihood가 NaN/Inf이면 갱신 불가
         return;
     end
 
+    % particle들이 map curve와 얼마나 잘 association 되었는지 평가
     associatedRatio = particleAssociationRatio(cfg, likelihoodInfo);
     matchViz.associatedRatio = associatedRatio;
+
+    % association 비율이 너무 낮으면 outlier 측정으로 보고 갱신하지 않음
     minAssociatedRatio = getScalar(cfg, 'pfMinAssociatedParticleRatio', 0.0);
     if isfinite(associatedRatio) && associatedRatio < minAssociatedRatio
         return;
     end
 
+    % 유효한 log-likelihood만 구분
     finiteMask = isfinite(logL);
     safeLogL = logL;
-    safeLogL(~finiteMask) = min(logL(finiteMask)) - 100.0;
-    safeLogL = temperAndClipLogLikelihood(cfg, safeLogL);
+
+    % NaN/Inf likelihood는 계산 안정성을 위해 매우 낮은 finite 값으로 대체
+    % safeLogL(~finiteMask) = min(logL(finiteMask)) - 100.0;
+    safeLogL(~finiteMask) = [];
+
+    % likelihood가 너무 날카롭거나 극단적이지 않도록 tempering/clipping 적용
+    % safeLogL = temperAndClipLogLikelihood(cfg, safeLogL);
     matchViz.safeLogL = safeLogL;
+
+    % 현재 frame의 평균 log-likelihood 저장
     meanLogL = mean(safeLogL);
 
+    % Bayesian weight update:
+    % new weight ∝ old weight * likelihood
+    % log domain에서는 logW = log(old weight) + log-likelihood
     logW = log(max(wi, realmin)) + safeLogL;
+
+    % exp 계산 시 overflow를 막기 위한 수치 안정화
     logW = logW - max(logW);
+
+    % log weight를 일반 weight로 변환
     wi = exp(logW);
     wsum = sum(wi);
 
+    % weight 합이 비정상이면 uniform weight로 복구하고 갱신 실패로 반환
     if wsum <= 0 || ~isfinite(wsum)
         wi = (1 / numel(wi)) * ones(size(wi));
         return;
     end
 
+    % weight 합이 1이 되도록 정규화
     wi = wi / wsum;
-    uniformMix = min(max(getScalar(cfg, 'pfWeightUniformMix', 0.0), 0.0), 1.0);
-    if uniformMix > 0
-        wi = (1 - uniformMix) * wi + uniformMix / numel(wi);
-        wi = wi / sum(wi);
-    end
+
+    % particle weight가 특정 particle에 과도하게 몰리는 것을 완화하기 위해
+    % uniform distribution을 일부 섞을 수 있음
+    % uniformMix = min(max(getScalar(cfg, 'pfWeightUniformMix', 0.0), 0.0), 1.0);
+    % if uniformMix > 0
+    %     wi = (1 - uniformMix) * wi + uniformMix / numel(wi);
+    %     wi = wi / sum(wi);
+    % end
+
+    % 여기까지 도달하면 이번 측정값으로 weight update 성공
     used = true;
 end
 
@@ -289,17 +321,6 @@ function [x, neff] = weightedEstimate(xi, wi)
     x(1:2) = sum(xi(1:2, :) .* wi, 2);
     x(3) = atan2(sum(sin(xi(3, :)) .* wi), sum(cos(xi(3, :)) .* wi));
     neff = 1 / sum(wi .^ 2);
-end
-
-function sqrtP = sqrtPsd(P, stateDim)
-    if ~isequal(size(P), [stateDim, stateDim])
-        error('P0 must be a %d x %d covariance matrix.', stateDim, stateDim);
-    end
-
-    P = (P + P') / 2;
-    [V, D] = eig(P);
-    d = max(diag(D), 0);
-    sqrtP = V * diag(sqrt(d));
 end
 
 function logFrameProgress(logProgress, t, len, logInterval, used, resampled, ...

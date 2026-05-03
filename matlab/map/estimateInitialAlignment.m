@@ -5,10 +5,7 @@ function [x0, info] = estimateInitialAlignment(cfg, mapDB, meas)
 % highest curve-map likelihood. It shares the exact same likelihood model
 % used later by the particle filter.
 
-    prior = [getScalar(cfg, 'initPriorX', 0.0);
-             getScalar(cfg, 'initPriorY', 0.0);
-             deg2rad(getScalar(cfg, 'initPriorYawDeg', 0.0))
-            ];
+    prior = [0; 0; 0];
     x0 = prior;
     info = struct('frameIdx', [], 'x0', x0, 'prior', prior);
     
@@ -34,8 +31,8 @@ function [x0, info] = estimateInitialAlignment(cfg, mapDB, meas)
     searchY = getScalar(cfg, 'initSearchY', 10.0);
     searchYaw = deg2rad(getScalar(cfg, 'initSearchYawDeg', 30.0));
 
-    fineRadiusXY = getScalar(cfg, 'initFineRadiusXY', 1.0);
-    fineRadiusYaw = deg2rad(getScalar(cfg, 'initFineRadiusYawDeg', 2.0));
+    fineRadiusXY = getScalar(cfg, 'initFineSerachXY', 1.0);
+    fineRadiusYaw = deg2rad(getScalar(cfg, 'initFineSearchYawDeg', 2.0));
     
     cropMargin = getScalar(cfg, 'initMapCropMargin', 20.0);
     mapCrop = cropMapForSearch(mapDB, sourceXY, prior, searchX, searchY, cropMargin);
@@ -144,11 +141,6 @@ function best = searchGrid(cfg, mapDB, frame, xVals, yVals, yawVals)
 end
 
 function mapCrop = cropMapForSearch(mapDB, sourceXY, prior, searchX, searchY, margin)
-    if isempty(mapDB) || size(mapDB, 2) < 2
-        mapCrop = zeros(0, size(mapDB, 2));
-        return;
-    end
-
     sourceRadius = max(sqrt(sum(sourceXY.^2, 2)));
     xMin = prior(1) - searchX - sourceRadius - margin;
     xMax = prior(1) + searchX + sourceRadius + margin;
