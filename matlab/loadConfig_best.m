@@ -93,6 +93,7 @@ function config = loadConfig_best()
     config.assocDefaultRoadWidth   = 6.0;  % fallback road width if RVWD is missing [m]
     config.assocRoadWidthScale     = 1.5;  % body-map lateral gate scale
     config.assocMaxCurveMapDist    = 6.0;  % max distance for curve-map correspondence [m]
+    config.assocMapSegmentFitK     = 5;    % K nearest map points used to fit local segment distance
     config.assocMinCurveMatchFraction = 0.45; % minimum matched samples for one curve
     config.assocMinMatchedCurves   = 1;    % minimum map-associated query curves
     config.assocUseCurveMapCorrespondenceRule = true;

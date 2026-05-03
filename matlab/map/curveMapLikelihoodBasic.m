@@ -52,6 +52,7 @@ function [likelihood, info] = curveMapLikelihoodBasic(cfg, mapDB, queryInput, xS
     sigma = max(getScalar(cfg, 'likelihoodSigma', 1.0), eps);
     maxDist = getScalar(cfg, 'assocMaxCurveMapDist', 2.5);
     maxD2 = maxDist ^ 2;
+    segmentFitK = max(1, round(getScalar(cfg, 'assocMapSegmentFitK', 5)));
     minMatchFraction = getScalar(cfg, 'assocMinCurveMatchFraction', 0.45);
     minMatchedCurves = getScalar(cfg, 'assocMinMatchedCurves', 1);
     useAssociationGate = getLogical(cfg, 'assocUseCurveMapCorrespondenceRule', false);
@@ -90,7 +91,7 @@ function [likelihood, info] = curveMapLikelihoodBasic(cfg, mapDB, queryInput, xS
         qx = sampleXY(:, 1) .* c - sampleXY(:, 2) .* s + xEval(1, :);
         qy = sampleXY(:, 1) .* s + sampleXY(:, 2) .* c + xEval(2, :);
 
-        [d2, nnIdx] = nearestMapSquaredDistancesBasic(mapIndex, [qx(:), qy(:)]);
+        [d2, nnIdx] = nearestMapSegmentSquaredDistancesBasic(mapIndex, [qx(:), qy(:)], segmentFitK);
 
         if fovGate.enabled
             keepNearest = nearestPointsInsideFovBasic(mapIndex, xEval, nnIdx, nSample, fovGate, maxDist);
@@ -207,6 +208,96 @@ function [d2, idx] = nearestMapSquaredDistancesBasic(mapIndex, queryXY)
         dy = queryXY(first:last, 2) - mapY;
         [d2(first:last), localIdx] = min(dx .* dx + dy .* dy, [], 2);
         idx(first:last) = localIdx;
+    end
+end
+
+function [d2, idx] = nearestMapSegmentSquaredDistancesBasic(mapIndex, queryXY, segmentFitK)
+    % K개의 주변 map point로 local line segment를 피팅하고, query point와
+    % 그 segment 사이의 제곱거리를 반환한다. segmentFitK=1이면 기존
+    % point-to-point 최근접 거리와 같은 동작이 된다.
+    segmentFitK = max(1, round(segmentFitK));
+    if segmentFitK <= 1
+        [d2, idx] = nearestMapSquaredDistancesBasic(mapIndex, queryXY);
+        return;
+    end
+
+    d2 = inf(size(queryXY, 1), 1);
+    idx = ones(size(queryXY, 1), 1);
+    if isempty(mapIndex.xy) || isempty(queryXY)
+        return;
+    end
+
+    k = min(segmentFitK, size(mapIndex.xy, 1));
+    if k < 2
+        [d2, idx] = nearestMapSquaredDistancesBasic(mapIndex, queryXY);
+        return;
+    end
+
+    if mapIndex.hasKdTree && ~isempty(mapIndex.searcher) && exist('knnsearch', 'file') == 2
+        [neighborIdx, ~] = knnsearch(mapIndex.searcher, queryXY, 'K', k);
+    else
+        neighborIdx = knnsearchBruteForceBasic(mapIndex.xy, queryXY, k);
+    end
+
+    neighborIdx = reshape(neighborIdx, size(queryXY, 1), k);
+
+    idx = neighborIdx(:, 1);
+    d2 = pointToFittedSegmentSquaredDistances(queryXY, mapIndex.xy, neighborIdx);
+end
+
+function neighborIdx = knnsearchBruteForceBasic(mapXY, queryXY, k)
+    neighborIdx = ones(size(queryXY, 1), k);
+    mapX = mapXY(:, 1).';
+    mapY = mapXY(:, 2).';
+    chunkSize = 256;
+
+    for first = 1:chunkSize:size(queryXY, 1)
+        last = min(first + chunkSize - 1, size(queryXY, 1));
+        dx = queryXY(first:last, 1) - mapX;
+        dy = queryXY(first:last, 2) - mapY;
+        d2 = dx .* dx + dy .* dy;
+        [~, order] = sort(d2, 2, 'ascend');
+        neighborIdx(first:last, :) = order(:, 1:k);
+    end
+end
+
+function d2 = pointToFittedSegmentSquaredDistances(queryXY, mapXY, neighborIdx)
+    % 각 query마다 K개 neighbor의 PCA 주방향을 구해 finite segment를 만들고,
+    % query를 그 segment에 사영한 뒤 point-to-segment 제곱거리를 계산한다.
+    neighborX = reshape(mapXY(neighborIdx(:), 1), size(neighborIdx));
+    neighborY = reshape(mapXY(neighborIdx(:), 2), size(neighborIdx));
+
+    centerX = mean(neighborX, 2);
+    centerY = mean(neighborY, 2);
+    dx = neighborX - centerX;
+    dy = neighborY - centerY;
+
+    covXX = sum(dx .* dx, 2);
+    covXY = sum(dx .* dy, 2);
+    covYY = sum(dy .* dy, 2);
+
+    theta = 0.5 * atan2(2.0 * covXY, covXX - covYY);
+    dirX = cos(theta);
+    dirY = sin(theta);
+
+    proj = dx .* dirX + dy .* dirY;
+    segMin = min(proj, [], 2);
+    segMax = max(proj, [], 2);
+
+    qx = queryXY(:, 1) - centerX;
+    qy = queryXY(:, 2) - centerY;
+    qProj = qx .* dirX + qy .* dirY;
+    qProj = min(max(qProj, segMin), segMax);
+
+    closestX = centerX + qProj .* dirX;
+    closestY = centerY + qProj .* dirY;
+    d2 = (queryXY(:, 1) - closestX) .^ 2 + (queryXY(:, 2) - closestY) .^ 2;
+
+    degenerate = (covXX + covYY) <= eps | ~isfinite(d2);
+    if any(degenerate)
+        pointD2 = (neighborX(degenerate, :) - queryXY(degenerate, 1)) .^ 2 + ...
+                  (neighborY(degenerate, :) - queryXY(degenerate, 2)) .^ 2;
+        d2(degenerate) = min(pointD2, [], 2);
     end
 end
 

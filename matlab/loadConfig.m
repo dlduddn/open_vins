@@ -138,6 +138,7 @@ function config = loadConfig()
     config.assocMinCurveMatchFraction = 0.45; % minimum matched samples for one curve
     
     config.assocMaxCurveMapDist    = 20.0;  % max distance for curve-map correspondence [m]
+    config.assocMapSegmentFitK     = 5;     % K nearest map points used to fit local segment distance
     config.assocMinMatchedCurves   = 1;    % minimum map-associated query curves
 
     config.assocUseMapKdTree       = true; % use KD-tree nearest-neighbor acceleration
